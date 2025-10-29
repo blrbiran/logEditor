@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
@@ -11,8 +11,8 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  background-color: #020617;
-  color: #f1f5f9;
+  background-color: #f8fafc;
+  color: #0f172a;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
@@ -26,7 +26,7 @@ body {
 
 .editor-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: #334155 #0f172a;
+  scrollbar-color: #cbd5f5 #e2e8f0;
 }
 
 .editor-scrollbar::-webkit-scrollbar {
@@ -34,11 +34,11 @@ body {
 }
 
 .editor-scrollbar::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #e2e8f0;
 }
 
 .editor-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #334155;
+  background-color: #93c5fd;
   border-radius: 9999px;
-  border: 2px solid #0f172a;
+  border: 2px solid #e2e8f0;
 }

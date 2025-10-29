@@ -4,44 +4,45 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px;
-  background: #0f172a;
-  color: #f8fafc;
+  padding: 20px;
+  background: #f9fafb;
+  color: #0f172a;
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 .search-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .search-label {
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: #64748b;
 }
 
 .search-input {
   padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid #1f2937;
-  background: #111827;
-  color: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #cbd5f5;
+  background: #ffffff;
+  color: #0f172a;
   font-size: 14px;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .search-input:focus {
-  outline: 2px solid #10b981;
+  outline: 2px solid #38bdf8;
   outline-offset: 2px;
 }
 
 .search-options {
   display: flex;
-  gap: 16px;
+  gap: 18px;
   font-size: 13px;
-  color: #cbd5f5;
+  color: #475569;
 }
 
 .search-option input {
@@ -50,23 +51,23 @@
 
 .search-button {
   align-self: flex-start;
-  padding: 8px 16px;
-  border-radius: 6px;
+  padding: 9px 18px;
+  border-radius: 9999px;
   border: 1px solid transparent;
-  background: #10b981;
-  color: #0f172a;
+  background: linear-gradient(135deg, #38bdf8, #2563eb);
+  color: #ffffff;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .search-button:hover {
-  background: #34d399;
   transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.25);
 }
 
 .search-status {
   margin: 0;
   font-size: 12px;
-  color: #94a3b8;
+  color: #64748b;
 }
