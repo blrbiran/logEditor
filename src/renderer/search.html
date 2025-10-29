@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Search Logs</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+  </head>
+
+  <body>
+    <main class="search-window">
+      <form id="search-form" class="search-form">
+        <label for="query" class="search-label">Search term</label>
+        <input
+          type="text"
+          id="query"
+          name="query"
+          placeholder="Enter text or regular expression"
+          autocomplete="off"
+          class="search-input"
+          required
+        />
+        <div class="search-options">
+          <label class="search-option">
+            <input type="checkbox" id="regex" name="regex" />
+            Regular expression
+          </label>
+          <label class="search-option">
+            <input type="checkbox" id="match-case" name="match-case" />
+            Match case
+          </label>
+        </div>
+        <button type="submit" class="search-button">Search</button>
+      </form>
+      <p id="status" class="search-status">Results will appear in the main window.</p>
+    </main>
+    <script type="module" src="/src/search.ts"></script>
+  </body>
+</html>

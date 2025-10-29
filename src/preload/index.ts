@@ -1,22 +1,113 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
+import type { IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import { basename } from 'path'
+
+type RemoveListener = () => void
+
+type SearchMatch = {
+  line: number
+  column: number
+  match: string
+  preview: string
+}
+
+type SearchResultItem = {
+  tabId: string
+  title: string
+  filePath?: string
+  matches: SearchMatch[]
+}
+
+type SearchRequest = {
+  query: string
+  isRegex: boolean
+  matchCase: boolean
+}
+
+type SaveFilePayload = {
+  filePath?: string
+  defaultPath?: string
+  content: string
+}
+
+type SearchableTab = {
+  id: string
+  title: string
+  filePath?: string
+  content: string
+}
+
+const subscribe = <Payload>(
+  channel: string,
+  listener: (payload: Payload) => void
+): RemoveListener => {
+  const handler = (_event: IpcRendererEvent, payload: Payload) => listener(payload)
+  ipcRenderer.on(channel, handler)
+  return () => {
+    ipcRenderer.removeListener(channel, handler)
+  }
+}
+
+const invoke = <Result>(channel: string, payload?: unknown): Promise<Result> => {
+  return ipcRenderer.invoke(channel, payload)
+}
 
 // Custom APIs for renderer
-const api = {}
+const api = {
+  openFileDialog: (): Promise<{ filePath: string; content: string }[]> =>
+    invoke('open-file-dialog'),
+  saveFileDialog: (payload: SaveFilePayload): Promise<{ canceled: boolean; filePath?: string }> =>
+    invoke('save-file-dialog', payload),
+  performSearch: (payload: SearchRequest): Promise<SearchResultItem[]> =>
+    invoke('perform-search', payload),
+  syncTabState: (tab: SearchableTab): void => {
+    ipcRenderer.send('sync-tab-state', tab)
+  },
+  removeTabState: (tabId: string): void => {
+    ipcRenderer.send('remove-tab-state', tabId)
+  },
+  emitSearchResults: (results: SearchResultItem[]): void => {
+    ipcRenderer.send('display-search-results', results)
+  },
+  emitNavigateToLine: (payload: { tabId: string; line: number; column?: number }): void => {
+    ipcRenderer.send('navigate-to-file-line', payload)
+  },
+  openSearchWindow: (): void => {
+    ipcRenderer.send('open-search-window')
+  },
+  onMenuNewFile: (listener: () => void): RemoveListener => subscribe('menu:new-file', listener),
+  onMenuOpenFile: (listener: () => void): RemoveListener => subscribe('menu:open-file', listener),
+  onMenuSaveFile: (listener: () => void): RemoveListener => subscribe('menu:save-file', listener),
+  onMenuSaveFileAs: (listener: () => void): RemoveListener =>
+    subscribe('menu:save-file-as', listener),
+  onSearchResults: (listener: (payload: SearchResultItem[]) => void): RemoveListener =>
+    subscribe('search:results', listener),
+  onSearchNavigate: (
+    listener: (payload: { tabId: string; line: number; column?: number }) => void
+  ): RemoveListener => subscribe('search:navigate', listener)
+}
+
+const extendedElectronApi = {
+  ...electronAPI,
+  path: {
+    basename
+  }
+}
 
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise
 // just add to the DOM global.
 if (process.contextIsolated) {
   try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
+    contextBridge.exposeInMainWorld('electron', extendedElectronApi)
     contextBridge.exposeInMainWorld('api', api)
   } catch (error) {
     console.error(error)
   }
 } else {
   // @ts-ignore (define in dts)
-  window.electron = electronAPI
+  window.electron = extendedElectronApi
   // @ts-ignore (define in dts)
   window.api = api
 }
