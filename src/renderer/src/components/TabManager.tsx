@@ -26,9 +26,17 @@ type SearchTab = {
   isActive: boolean
 }
 
-type Tab = FileTab | SearchTab
+type WelcomeTab = {
+  kind: 'welcome'
+  id: string
+  title: string
+  isActive: boolean
+}
+
+type Tab = FileTab | SearchTab | WelcomeTab
 
 const isFileTab = (tab: Tab): tab is FileTab => tab.kind === 'file'
+const isWelcomeTab = (tab: Tab): tab is WelcomeTab => tab.kind === 'welcome'
 
 const buildDefaultFilename = (title: string): string => {
   const sanitized = title.replace(/\s+/g, '_').toLowerCase()
@@ -63,20 +71,26 @@ const computeSnippet = (
 
 const api: LogEditorApi = window.api
 const SEARCH_TAB_ID = 'search-results-tab'
+const WELCOME_TAB_ID = 'welcome-tab'
+
+const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
+  kind: 'welcome',
+  id: WELCOME_TAB_ID,
+  title: 'Welcome',
+  isActive
+})
 
 function TabManager(): React.JSX.Element {
-  const [tabs, setTabs] = useState<Tab[]>([])
-  const [activeTabId, setActiveTabId] = useState<string | null>(null)
-  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [tabs, setTabs] = useState<Tab[]>(() => [createWelcomeTab(true)])
+  const [activeTabId, setActiveTabId] = useState<string | null>(WELCOME_TAB_ID)
 
-  const tabsRef = useRef<Tab[]>([])
-  const activeTabIdRef = useRef<string | null>(null)
+  const tabsRef = useRef<Tab[]>([createWelcomeTab(true)])
+  const activeTabIdRef = useRef<string | null>(WELCOME_TAB_ID)
   const untitledCounterRef = useRef<number>(1)
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
   const highlightTimeoutRef = useRef<number | null>(null)
-  const statusTimeoutRef = useRef<number | null>(null)
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -85,6 +99,11 @@ function TabManager(): React.JSX.Element {
   useEffect(() => {
     activeTabIdRef.current = activeTabId
   }, [activeTabId])
+
+  const updateActiveTab = useCallback((id: string | null) => {
+    setActiveTabId(id)
+    activeTabIdRef.current = id
+  }, [])
 
   useEffect(() => {
     tabs.filter(isFileTab).forEach((tab) => {
@@ -136,21 +155,7 @@ function TabManager(): React.JSX.Element {
       if (highlightTimeoutRef.current) {
         window.clearTimeout(highlightTimeoutRef.current)
       }
-      if (statusTimeoutRef.current) {
-        window.clearTimeout(statusTimeoutRef.current)
-      }
     }
-  }, [])
-
-  const showStatus = useCallback((message: string) => {
-    if (statusTimeoutRef.current) {
-      window.clearTimeout(statusTimeoutRef.current)
-    }
-    setStatusMessage(message)
-    statusTimeoutRef.current = window.setTimeout(() => {
-      setStatusMessage(null)
-      statusTimeoutRef.current = null
-    }, 3000)
   }, [])
 
   const focusLine = useCallback((tabId: string, line: number, column = 1) => {
@@ -221,9 +226,8 @@ function TabManager(): React.JSX.Element {
       }
       return [...reset, newTab]
     })
-    setActiveTabId(id)
-    showStatus(`Created ${title}`)
-  }, [showStatus])
+    updateActiveTab(id)
+  }, [updateActiveTab])
 
   const openFiles = useCallback(async () => {
     const files = await api.openFileDialog()
@@ -262,7 +266,6 @@ function TabManager(): React.JSX.Element {
             isDirty: false,
             isActive: true
           }
-          updatedTabs = updatedTabs.map((tab) => ({ ...tab, isActive: false }))
           updatedTabs = [...updatedTabs, newTab]
           activeId = id
         }
@@ -271,12 +274,8 @@ function TabManager(): React.JSX.Element {
       nextActiveTabId = activeId ?? null
       return updatedTabs
     })
-    setActiveTabId(nextActiveTabId)
-
-    const status =
-      files.length === 1 ? `Opened ${files[0].filePath}` : `Opened ${files.length} files`
-    showStatus(status)
-  }, [showStatus])
+    updateActiveTab(nextActiveTabId)
+  }, [updateActiveTab])
 
   const switchTab = useCallback((tabId: string) => {
     setTabs((prev) =>
@@ -285,21 +284,27 @@ function TabManager(): React.JSX.Element {
         isActive: tab.id === tabId
       }))
     )
-    setActiveTabId(tabId)
-  }, [])
+    updateActiveTab(tabId)
+  }, [updateActiveTab])
 
   const closeTab = useCallback((tabId: string) => {
     let removedTab: Tab | undefined
     setTabs((prev) => {
       const target = prev.find((tab) => tab.id === tabId)
       removedTab = target
-      const filtered = prev.filter((tab) => tab.id !== tabId)
+      const remaining = prev.filter((tab) => tab.id !== tabId)
+      if (remaining.length === 0) {
+        const welcome = createWelcomeTab(true)
+        updateActiveTab(welcome.id)
+        return [welcome]
+      }
+
       const closedIndex = prev.findIndex((tab) => tab.id === tabId)
-      const fallback = filtered[closedIndex - 1] ?? filtered[0] ?? null
+      const fallback = remaining[closedIndex - 1] ?? remaining[0] ?? null
       const nextActiveId =
         activeTabIdRef.current === tabId ? fallback?.id ?? null : activeTabIdRef.current
-      setActiveTabId(nextActiveId)
-      return filtered.map((tab) => ({
+      updateActiveTab(nextActiveId)
+      return remaining.map((tab) => ({
         ...tab,
         isActive: tab.id === nextActiveId
       }))
@@ -308,7 +313,7 @@ function TabManager(): React.JSX.Element {
     if (removedTab && isFileTab(removedTab)) {
       api.removeTabState(tabId)
     }
-  }, [])
+  }, [updateActiveTab])
 
   const updateTabContent = useCallback((tabId: string, content: string) => {
     setTabs((prev) =>
@@ -323,6 +328,18 @@ function TabManager(): React.JSX.Element {
       )
     )
   }, [])
+
+  const closeActiveTab = useCallback(() => {
+    const currentId = activeTabIdRef.current
+    if (!currentId) {
+      return
+    }
+    const currentTab = tabsRef.current.find((tab) => tab.id === currentId)
+    if (!currentTab || isWelcomeTab(currentTab)) {
+      return
+    }
+    closeTab(currentId)
+  }, [closeTab])
 
   const handleSave = useCallback(
     async (forceSaveAs: boolean) => {
@@ -357,9 +374,8 @@ function TabManager(): React.JSX.Element {
             : tab
         )
       )
-      showStatus(`Saved to ${newTitle}`)
     },
-    [showStatus]
+    []
   )
 
   const handleSearchResultSelect = useCallback(
@@ -370,10 +386,10 @@ function TabManager(): React.JSX.Element {
           isActive: tab.id === result.tabId
         }))
       )
-      setActiveTabId(result.tabId)
+      updateActiveTab(result.tabId)
       requestAnimationFrame(() => focusLine(result.tabId, match.line, match.column))
     },
-    [focusLine]
+    [focusLine, updateActiveTab]
   )
 
   useEffect(() => {
@@ -382,6 +398,7 @@ function TabManager(): React.JSX.Element {
       api.onMenuOpenFile(() => openFiles()),
       api.onMenuSaveFile(() => handleSave(false)),
       api.onMenuSaveFileAs(() => handleSave(true)),
+      api.onMenuCloseTab(() => closeActiveTab()),
       api.onSearchResults((results) => {
         const totalMatches = results.reduce((acc, item) => acc + item.matches.length, 0)
         setTabs((prev) => {
@@ -397,18 +414,7 @@ function TabManager(): React.JSX.Element {
           }
           return [...reset, searchTab]
         })
-        setActiveTabId(SEARCH_TAB_ID)
-
-        if (totalMatches > 0) {
-          const fileCount = results.length
-          showStatus(
-            `Found ${totalMatches} match${totalMatches === 1 ? '' : 'es'} in ${fileCount} file${
-              fileCount === 1 ? '' : 's'
-            }`
-          )
-        } else {
-          showStatus('No matches found')
-        }
+        updateActiveTab(SEARCH_TAB_ID)
       }),
       api.onSearchNavigate(({ tabId, line, column }) => {
         const exists = tabsRef.current.some((tab) => tab.id === tabId)
@@ -421,7 +427,7 @@ function TabManager(): React.JSX.Element {
             isActive: tab.id === tabId
           }))
         )
-        setActiveTabId(tabId)
+        updateActiveTab(tabId)
         requestAnimationFrame(() => focusLine(tabId, line, column))
       })
     ]
@@ -429,14 +435,22 @@ function TabManager(): React.JSX.Element {
     return () => {
       disposers.forEach((dispose) => dispose())
     }
-  }, [createNewTab, focusLine, handleSave, openFiles, showStatus])
+  }, [closeActiveTab, createNewTab, focusLine, handleSave, openFiles])
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [tabs, activeTabId]
   )
 
-  const renderWelcome = activeTab === null && tabs.length === 0
+  const renderWelcomeContent = (): React.JSX.Element => (
+    <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-500">
+      <h1 className="text-3xl font-semibold text-slate-800">Welcome to LogEditor</h1>
+      <p className="max-w-md text-sm text-slate-500">
+        Use the File menu to create a blank log or open an existing one. When you are ready to
+        search across files, open the Search window from the menu.
+      </p>
+    </div>
+  )
 
   const renderSearchContent = (tab: SearchTab): React.JSX.Element => {
     return (
@@ -502,16 +516,24 @@ function TabManager(): React.JSX.Element {
 
   return (
     <div className="relative flex h-full flex-col bg-slate-50 text-slate-900">
-      <nav className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2">
+      <nav
+        className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-2 py-2"
+        onDoubleClick={(event) => {
+          const target = event.target as HTMLElement
+          if (!target.closest('button')) {
+            createNewTab()
+          }
+        }}
+      >
         {tabs.map((tab) => (
           <button
             key={tab.id}
             type="button"
             onClick={() => switchTab(tab.id)}
-            className={`group flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition ${
+            className={`group flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition ${
               tab.isActive
-                ? 'bg-sky-500 text-white shadow-sm shadow-sky-100'
-                : 'bg-slate-100 text-slate-500 hover:bg-sky-100 hover:text-sky-700'
+                ? 'border-sky-500 bg-white text-sky-700 shadow'
+                : 'border-transparent bg-slate-100 text-slate-500 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'
             }`}
           >
             <span className="max-w-[200px] truncate">{tab.title}</span>
@@ -535,15 +557,7 @@ function TabManager(): React.JSX.Element {
 
       <main className="flex-1 overflow-hidden bg-slate-100 p-4">
         <div className="h-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          {renderWelcome ? (
-            <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-500">
-              <h1 className="text-3xl font-semibold text-slate-800">Welcome to LogEditor</h1>
-              <p className="max-w-md text-sm text-slate-500">
-                Use the File menu to create a blank log or open an existing one. When you are ready
-                to search across files, open the Search window from the menu.
-              </p>
-            </div>
-          ) : activeTab ? (
+          {activeTab ? (
             isFileTab(activeTab) ? (
               <div className="relative h-full">
                 <textarea
@@ -563,21 +577,13 @@ function TabManager(): React.JSX.Element {
                 />
               </div>
             ) : (
-              renderSearchContent(activeTab)
+              isWelcomeTab(activeTab) ? renderWelcomeContent() : renderSearchContent(activeTab)
             )
           ) : (
-            <div className="flex h-full items-center justify-center text-slate-500">
-              Select a tab to begin editing.
-            </div>
+            renderWelcomeContent()
           )}
         </div>
       </main>
-
-      {statusMessage ? (
-        <div className="pointer-events-none absolute bottom-6 right-6 rounded-full bg-slate-900/85 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-slate-400/40">
-          {statusMessage}
-        </div>
-      ) : null}
     </div>
   )
 }

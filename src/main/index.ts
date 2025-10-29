@@ -230,7 +230,12 @@ function buildApplicationMenu(): void {
         click: () => sendToRenderer('menu:save-file-as')
       },
       { type: 'separator' },
-      process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
+      {
+        label: 'Close Tab',
+        accelerator: 'CmdOrCtrl+W',
+        click: () => sendToRenderer('menu:close-tab')
+      },
+      ...(process.platform === 'darwin' ? [] : [{ role: 'quit' } satisfies MenuItemConstructorOptions])
     ]
   }
 
@@ -278,7 +283,13 @@ function buildApplicationMenu(): void {
     role: 'window',
     submenu:
       process.platform === 'darwin'
-        ? [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+        ? [
+            { role: 'minimize' },
+            { role: 'zoom' },
+            { label: 'Close Window', accelerator: 'CmdOrCtrl+Shift+W', role: 'close' },
+            { type: 'separator' },
+            { role: 'front' }
+          ]
         : [{ role: 'minimize' }, { role: 'close' }]
   }
 

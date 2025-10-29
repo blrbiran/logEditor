@@ -81,6 +81,7 @@ const api = {
   onMenuSaveFile: (listener: () => void): RemoveListener => subscribe('menu:save-file', listener),
   onMenuSaveFileAs: (listener: () => void): RemoveListener =>
     subscribe('menu:save-file-as', listener),
+  onMenuCloseTab: (listener: () => void): RemoveListener => subscribe('menu:close-tab', listener),
   onSearchResults: (listener: (payload: SearchResultItem[]) => void): RemoveListener =>
     subscribe('search:results', listener),
   onSearchNavigate: (
