@@ -114,7 +114,7 @@ function createSearchWindow(): void {
 
   searchWindow = new BrowserWindow({
     width: 420,
-    height: 220,
+    height: 440,
     resizable: false,
     minimizable: false,
     maximizable: false,

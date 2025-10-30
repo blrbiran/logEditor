@@ -7,10 +7,12 @@ const regexInput = document.getElementById('regex') as HTMLInputElement | null
 const matchCaseInput = document.getElementById('match-case') as HTMLInputElement | null
 const statusElement = document.getElementById('status') as HTMLParagraphElement | null
 
-const setStatus = (message: string, isError = false): void => {
+type StatusState = 'idle' | 'pending' | 'success' | 'error'
+
+const setStatus = (message: string, state: StatusState = 'idle'): void => {
   if (!statusElement) return
   statusElement.textContent = message
-  statusElement.style.color = isError ? '#f87171' : '#94a3b8'
+  statusElement.dataset.state = state
 }
 
 const handleSearch = async (): Promise<void> => {
@@ -20,7 +22,7 @@ const handleSearch = async (): Promise<void> => {
 
   const query = queryInput.value.trim()
   if (!query) {
-    setStatus('Please enter text to search.', true)
+    setStatus('Please enter text to search.', 'error')
     return
   }
 
@@ -31,18 +33,21 @@ const handleSearch = async (): Promise<void> => {
   }
 
   try {
-    setStatus('Searching…')
+    setStatus('Searching…', 'pending')
     const results = (await window.api.performSearch(request)) as SearchResultItem[]
     window.api.emitSearchResults(results)
     const totalMatches = results.reduce((acc, item) => acc + item.matches.length, 0)
     if (totalMatches === 0) {
-      setStatus('No matches found.', true)
+      setStatus('No matches found.', 'idle')
     } else {
-      setStatus(`Sent ${totalMatches} match${totalMatches === 1 ? '' : 'es'} to the main window.`)
+      setStatus(
+        `Sent ${totalMatches} match${totalMatches === 1 ? '' : 'es'} to the main window.`,
+        'success'
+      )
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Search failed.'
-    setStatus(`Error: ${message}`, true)
+    setStatus(`Error: ${message}`, 'error')
   }
 }
 

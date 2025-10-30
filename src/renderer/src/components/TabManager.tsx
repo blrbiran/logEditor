@@ -107,6 +107,7 @@ function TabManager(): React.JSX.Element {
   const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
   const highlightTimeoutRef = useRef<number | null>(null)
   const searchContainerRef = useRef<HTMLDivElement | null>(null)
+  const searchObserverRef = useRef<MutationObserver | null>(null)
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -546,6 +547,48 @@ function TabManager(): React.JSX.Element {
   }, [tabs])
 
   useEffect(() => {
+    const container = searchContainerRef.current
+    if (!container || activeTabId !== SEARCH_TAB_ID) {
+      searchObserverRef.current?.disconnect()
+      searchObserverRef.current = null
+      return
+    }
+
+    const enforceOpacity = () => {
+      const currentOpacity = container.style.opacity
+      if (currentOpacity !== '' && currentOpacity !== '1') {
+        debugLog('correcting search container opacity', currentOpacity)
+        container.style.opacity = '1'
+      }
+    }
+
+    enforceOpacity()
+    container.style.transition = 'none'
+
+    const observer = new MutationObserver(enforceOpacity)
+    observer.observe(container, { attributes: true, attributeFilter: ['style'] })
+    searchObserverRef.current = observer
+
+    const handleScrollOrPointer = () => {
+      enforceOpacity()
+    }
+
+    container.addEventListener('scroll', handleScrollOrPointer)
+    container.addEventListener('mouseenter', handleScrollOrPointer)
+    container.addEventListener('mouseleave', handleScrollOrPointer)
+
+    return () => {
+      observer.disconnect()
+      if (searchObserverRef.current === observer) {
+        searchObserverRef.current = null
+      }
+      container.removeEventListener('scroll', handleScrollOrPointer)
+      container.removeEventListener('mouseenter', handleScrollOrPointer)
+      container.removeEventListener('mouseleave', handleScrollOrPointer)
+    }
+  }, [activeTabId])
+
+  useEffect(() => {
     if (activeTab) {
       debugLog('activeTab updated', {
         activeTabId,
@@ -570,73 +613,83 @@ function TabManager(): React.JSX.Element {
   )
 
   const renderSearchContent = (tab: SearchTab): React.JSX.Element => {
+    const summary = tab.totalMatches
+      ? `${tab.totalMatches} match${tab.totalMatches === 1 ? '' : 'es'} across ${tab.results.length} file${
+          tab.results.length === 1 ? '' : 's'
+        }`
+      : 'No matches yet — try adjusting your query.'
+
     return (
-      <div className="flex h-full flex-col">
-        <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
-          <h2 className="text-lg font-semibold text-slate-800">Search Results</h2>
-          <p className="text-sm text-slate-500">
-            {tab.totalMatches
-              ? `${tab.totalMatches} match${tab.totalMatches === 1 ? '' : 'es'} across ${tab.results.length} file${
-                  tab.results.length === 1 ? '' : 's'
-                }`
-              : 'Try another search from the Search menu.'}
+      <div className="flex h-full flex-col bg-slate-50">
+        <div className="border-b border-slate-200 bg-white/70 px-6 py-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-500">
+            Search results
           </p>
+          <h2 className="mt-1 text-lg font-semibold text-slate-800">Overview</h2>
+          <p className="mt-1 text-sm text-slate-500">{summary}</p>
         </div>
         <div
           ref={searchContainerRef}
-          className="flex-1 overflow-y-auto px-5 py-4"
-          style={{ opacity: 1 }}
+          className="flex-1 overflow-y-auto px-6 py-5"
         >
           {tab.results.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center text-slate-500">
-              <p>No matches were found for your last search.</p>
+            <div className="flex h-full items-center justify-center">
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-8 py-10 text-center shadow-sm">
+                <p className="text-sm font-semibold text-slate-600">No matches were found.</p>
+                <p className="mt-2 text-xs text-slate-400">Try another keyword or enable regex.</p>
+              </div>
             </div>
           ) : (
-            tab.results.map((result) => (
-              <div
-                key={result.tabId}
-                className="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:shadow-md"
-              >
-                <div className="flex items-center justify-between text-sm font-semibold text-slate-700">
-                  <span className="truncate">{result.title}</span>
-                  <span className="text-slate-400">
-                    {result.matches.length} match{result.matches.length === 1 ? '' : 'es'}
-                  </span>
+            tab.results.map((result) => {
+              return (
+                <div
+                  key={result.tabId}
+                  className="mb-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-300 hover:shadow-md"
+                >
+                  <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-slate-100 pb-4">
+                    <p className="max-w-[260px] truncate text-sm font-semibold text-slate-800">
+                      {result.title}
+                    </p>
+                    <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-medium text-sky-600">
+                      {result.matches.length} match{result.matches.length === 1 ? '' : 'es'}
+                    </span>
+                  </div>
+                  <div className="mt-4 space-y-2 text-xs">
+                    {result.matches.map((match, index) => {
+                      const key = `${result.tabId}-${match.line}-${index}`
+                      const snippet = computeSnippet(match)
+                      debugLog('rendering search match', {
+                        tabTitle: result.title,
+                        matchLine: match.line,
+                        matchColumn: match.column,
+                        snippet
+                      })
+                      return (
+                        <button
+                          type="button"
+                          key={key}
+                          className="group w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-sky-300 hover:bg-white"
+                          onClick={() => handleSearchResultSelect(result, match)}
+                        >
+                          <div className="flex items-center gap-3 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                            <span>Line {match.line}</span>
+                            <span>•</span>
+                            <span>Col {match.column}</span>
+                          </div>
+                          <div className="mt-2 rounded-lg bg-slate-900 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow transition group-hover:bg-slate-900/95">
+                            <span className="text-slate-300">{snippet.before || ' '}</span>
+                            <span className="rounded bg-amber-300 px-1 font-semibold text-slate-900">
+                              {snippet.highlight || '(empty match)'}
+                            </span>
+                            <span className="text-slate-300">{snippet.after || ' '}</span>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
                 </div>
-                <div className="mt-3 space-y-2 text-xs">
-                  {result.matches.map((match, index) => {
-                    const key = `${result.tabId}-${match.line}-${index}`
-                    const snippet = computeSnippet(match)
-                    debugLog('rendering search match', {
-                      tabTitle: result.title,
-                      matchLine: match.line,
-                      matchColumn: match.column,
-                      snippet
-                    })
-                    return (
-                      <button
-                        type="button"
-                        key={key}
-                        className="block w-full rounded-lg border border-transparent bg-slate-50 px-3 py-2 text-left transition hover:border-sky-400 hover:bg-sky-50"
-                        onClick={() => handleSearchResultSelect(result, match)}
-                      >
-                        <div className="flex justify-between font-mono text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                          <span>Line {match.line}</span>
-                          <span>Col {match.column}</span>
-                        </div>
-                        <div className="mt-2 rounded-md bg-slate-900/90 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow">
-                          <span className="text-slate-300">{snippet.before || ' '}</span>
-                          <span className="rounded bg-amber-300 px-1 font-semibold text-slate-900">
-                            {snippet.highlight || '(empty match)'}
-                          </span>
-                          <span className="text-slate-300">{snippet.after || ' '}</span>
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            ))
+              )
+            })
           )}
         </div>
       </div>

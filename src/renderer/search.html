@@ -11,31 +11,57 @@
   </head>
 
   <body>
-    <main class="search-window">
-      <form id="search-form" class="search-form">
-        <label for="query" class="search-label">Search term</label>
-        <input
-          type="text"
-          id="query"
-          name="query"
-          placeholder="Enter text or regular expression"
-          autocomplete="off"
-          class="search-input"
-          required
-        />
-        <div class="search-options">
-          <label class="search-option">
-            <input type="checkbox" id="regex" name="regex" />
-            Regular expression
-          </label>
-          <label class="search-option">
-            <input type="checkbox" id="match-case" name="match-case" />
-            Match case
-          </label>
-        </div>
-        <button type="submit" class="search-button">Search</button>
-      </form>
-      <p id="status" class="search-status">Results will appear in the main window.</p>
+    <main class="search-shell">
+      <section class="search-panel">
+        <header class="search-header">
+          <div>
+            <p class="search-eyebrow">Global search</p>
+            <h1 class="search-title">Look through every open log</h1>
+            <p class="search-subtitle">
+              Run a quick query without leaving the file you are editing.
+            </p>
+          </div>
+        </header>
+
+        <form id="search-form" class="search-form">
+          <div class="search-field">
+            <label for="query" class="search-label">Search term</label>
+            <input
+              type="text"
+              id="query"
+              name="query"
+              placeholder="Enter text or regular expression"
+              autocomplete="off"
+              class="search-input"
+              required
+            />
+          </div>
+
+          <div class="search-options" role="group" aria-label="Search options">
+            <label class="search-checkbox">
+              <input type="checkbox" id="regex" name="regex" />
+              <span>Use regular expression</span>
+            </label>
+            <label class="search-checkbox">
+              <input type="checkbox" id="match-case" name="match-case" />
+              <span>Match case</span>
+            </label>
+          </div>
+
+          <div class="search-footer">
+            <button type="submit" class="search-button">Run search</button>
+            <p
+              id="status"
+              class="search-status"
+              role="status"
+              aria-live="polite"
+              data-state="idle"
+            >
+              Results will appear in the main window.
+            </p>
+          </div>
+        </form>
+      </section>
     </main>
     <script type="module" src="/src/search.ts"></script>
   </body>
