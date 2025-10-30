@@ -106,6 +106,7 @@ function TabManager(): React.JSX.Element {
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
   const highlightTimeoutRef = useRef<number | null>(null)
+  const searchContainerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -472,6 +473,7 @@ function TabManager(): React.JSX.Element {
       api.onMenuSaveFileAs(() => handleSave(true)),
       api.onMenuCloseTab(() => closeActiveTab()),
       api.onSearchResults((results) => {
+        debugLog('onSearchResults received', results)
         const totalMatches = results.reduce((acc, item) => acc + item.matches.length, 0)
         setTabs((prev) => {
           const withoutSearch = prev.filter((tab) => tab.id !== SEARCH_TAB_ID)
@@ -484,6 +486,14 @@ function TabManager(): React.JSX.Element {
             totalMatches,
             isActive: true
           }
+          debugLog('onSearchResults computed searchTab', {
+            totalMatches,
+            resultsSummary: results.map((item) => ({
+              tabId: item.tabId,
+              title: item.title,
+              matches: item.matches.length
+            }))
+          })
           return [...reset, searchTab]
         })
         updateActiveTab(SEARCH_TAB_ID)
@@ -513,6 +523,27 @@ function TabManager(): React.JSX.Element {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [tabs, activeTabId]
   )
+
+  useEffect(() => {
+    const searchTab = tabs.find(
+      (tab): tab is SearchTab => tab.id === SEARCH_TAB_ID && tab.kind === 'search'
+    )
+    if (searchTab) {
+      debugLog('searchTab snapshot', {
+        totalMatches: searchTab.totalMatches,
+        results: searchTab.results.map((item) => ({
+          title: item.title,
+          matches: item.matches.length,
+          matchPreview: item.matches[0]
+            ? { line: item.matches[0].line, column: item.matches[0].column, preview: item.matches[0].preview }
+            : null
+        }))
+      })
+      if (searchContainerRef.current) {
+        searchContainerRef.current.style.opacity = '1'
+      }
+    }
+  }, [tabs])
 
   useEffect(() => {
     if (activeTab) {
@@ -551,7 +582,11 @@ function TabManager(): React.JSX.Element {
               : 'Try another search from the Search menu.'}
           </p>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div
+          ref={searchContainerRef}
+          className="flex-1 overflow-y-auto px-5 py-4"
+          style={{ opacity: 1 }}
+        >
           {tab.results.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center text-slate-500">
               <p>No matches were found for your last search.</p>
@@ -572,21 +607,29 @@ function TabManager(): React.JSX.Element {
                   {result.matches.map((match, index) => {
                     const key = `${result.tabId}-${match.line}-${index}`
                     const snippet = computeSnippet(match)
+                    debugLog('rendering search match', {
+                      tabTitle: result.title,
+                      matchLine: match.line,
+                      matchColumn: match.column,
+                      snippet
+                    })
                     return (
                       <button
                         type="button"
                         key={key}
-                        className="w-full rounded-lg border border-transparent bg-slate-50 px-3 py-2 text-left font-mono text-[11px] leading-5 text-slate-700 transition hover:border-sky-400 hover:bg-sky-50"
+                        className="block w-full rounded-lg border border-transparent bg-slate-50 px-3 py-2 text-left transition hover:border-sky-400 hover:bg-sky-50"
                         onClick={() => handleSearchResultSelect(result, match)}
                       >
-                        <div className="flex justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                        <div className="flex justify-between font-mono text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                           <span>Line {match.line}</span>
                           <span>Col {match.column}</span>
                         </div>
-                        <div className="mt-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                          <span className="text-slate-400">{snippet.before}</span>
-                          <span className="text-amber-500">{snippet.highlight}</span>
-                          <span className="text-slate-400">{snippet.after}</span>
+                        <div className="mt-2 rounded-md bg-slate-900/90 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow">
+                          <span className="text-slate-300">{snippet.before || ' '}</span>
+                          <span className="rounded bg-amber-300 px-1 font-semibold text-slate-900">
+                            {snippet.highlight || '(empty match)'}
+                          </span>
+                          <span className="text-slate-300">{snippet.after || ' '}</span>
                         </div>
                       </button>
                     )
