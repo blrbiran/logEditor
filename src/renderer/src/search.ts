@@ -1,5 +1,5 @@
 import './search.css'
-import type { SearchRequest, SearchResultItem } from './env'
+import type { ActiveContext, SearchRequest, SearchResponsePayload } from './env'
 
 const form = document.getElementById('search-form') as HTMLFormElement | null
 const queryInput = document.getElementById('query') as HTMLInputElement | null
@@ -9,10 +9,27 @@ const statusElement = document.getElementById('status') as HTMLParagraphElement 
 
 type StatusState = 'idle' | 'pending' | 'success' | 'error'
 
+let currentContext: ActiveContext = { kind: 'welcome' }
+
 const setStatus = (message: string, state: StatusState = 'idle'): void => {
   if (!statusElement) return
   statusElement.textContent = message
   statusElement.dataset.state = state
+}
+
+const describeContext = (context: ActiveContext): string => {
+  if (context.kind === 'search') {
+    return 'Nested search mode — refining previous results.'
+  }
+  return 'Workspace search mode.'
+}
+
+const ensureIdleContextStatus = (): void => {
+  if (!statusElement) return
+  if (statusElement.dataset.state && statusElement.dataset.state !== 'idle') {
+    return
+  }
+  setStatus(describeContext(currentContext), 'idle')
 }
 
 const handleSearch = async (): Promise<void> => {
@@ -29,14 +46,21 @@ const handleSearch = async (): Promise<void> => {
   const request: SearchRequest = {
     query,
     isRegex: regexInput.checked,
-    matchCase: matchCaseInput.checked
+    matchCase: matchCaseInput.checked,
+    scope:
+      currentContext.kind === 'search'
+        ? { kind: 'search', searchId: currentContext.searchId }
+        : { kind: 'workspace' }
   }
 
   try {
-    setStatus('Searching…', 'pending')
-    const results = (await window.api.performSearch(request)) as SearchResultItem[]
-    window.api.emitSearchResults(results)
-    const totalMatches = results.reduce((acc, item) => acc + item.matches.length, 0)
+    setStatus(
+      request.scope?.kind === 'search' ? 'Searching within previous results…' : 'Searching…',
+      'pending'
+    )
+    const payload = (await window.api.performSearch(request)) as SearchResponsePayload
+    window.api.emitSearchResults(payload)
+    const totalMatches = payload.results.reduce((acc, item) => acc + item.matches.length, 0)
     if (totalMatches === 0) {
       setStatus('No matches found.', 'idle')
     } else {
@@ -51,6 +75,11 @@ const handleSearch = async (): Promise<void> => {
   }
 }
 
+window.api.onSearchContext((context) => {
+  currentContext = context
+  ensureIdleContextStatus()
+})
+
 if (form) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
@@ -62,5 +91,6 @@ if (queryInput) {
   window.requestAnimationFrame(() => {
     queryInput.focus()
     queryInput.select()
+    ensureIdleContextStatus()
   })
 }

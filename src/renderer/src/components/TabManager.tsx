@@ -4,7 +4,10 @@ import type {
   RemoveListener,
   SaveFileResult,
   SearchResultItem,
-  SearchMatch
+  SearchMatch,
+  SearchRequest,
+  SearchResponsePayload,
+  ActiveContext
 } from '../env'
 
 type FileTab = {
@@ -21,6 +24,8 @@ type SearchTab = {
   kind: 'search'
   id: string
   title: string
+  request: SearchRequest
+  parentSearchId?: string
   results: SearchResultItem[]
   totalMatches: number
   isActive: boolean
@@ -70,8 +75,29 @@ const computeSnippet = (
 }
 
 const api: LogEditorApi = window.api
-const SEARCH_TAB_ID = 'search-results-tab'
 const WELCOME_TAB_ID = 'welcome-tab'
+
+const truncate = (value: string, maxLength = 32): string =>
+  value.length > maxLength ? `${value.slice(0, maxLength)}...` : value
+
+const describeScope = (request: SearchRequest): string =>
+  request.scope?.kind === 'search' ? 'Refine' : 'Search'
+
+const formatSearchQuery = (request: SearchRequest): string => {
+  const trimmed = request.query.trim()
+  if (!trimmed.length) {
+    return '(empty)'
+  }
+  return request.isRegex ? `/${truncate(trimmed)}/` : `"${truncate(trimmed)}"`
+}
+
+const buildSearchTabTitle = (request: SearchRequest, totalMatches: number): string => {
+  const baseTitle = `${describeScope(request)}: ${formatSearchQuery(request)}`
+  return totalMatches ? `${baseTitle} (${totalMatches})` : baseTitle
+}
+
+const describeScopeDetail = (request: SearchRequest): string =>
+  request.scope?.kind === 'search' ? 'Within previous search results' : 'Across open tabs'
 
 const debugLog = (...args: unknown[]): void => {
   if (import.meta.env.DEV) {
@@ -187,6 +213,12 @@ function TabManager(): React.JSX.Element {
         debugLog('cleanup highlight timeout')
         window.clearTimeout(highlightTimeoutRef.current)
       }
+      tabsRef.current
+        .filter((tab): tab is SearchTab => tab.kind === 'search')
+        .forEach((searchTab) => {
+          debugLog('cleanup disposing search results', searchTab.id)
+          api.disposeSearchResults(searchTab.id)
+        })
     }
   }, [])
 
@@ -371,6 +403,9 @@ function TabManager(): React.JSX.Element {
     if (removedTab && isFileTab(removedTab)) {
       debugLog('closeTab removing tab state', removedTab.id)
       api.removeTabState(tabId)
+    } else if (removedTab && removedTab.kind === 'search') {
+      debugLog('closeTab disposing search results', removedTab.id)
+      api.disposeSearchResults(removedTab.id)
     }
   }, [updateActiveTab])
 
@@ -473,31 +508,38 @@ function TabManager(): React.JSX.Element {
       api.onMenuSaveFile(() => handleSave(false)),
       api.onMenuSaveFileAs(() => handleSave(true)),
       api.onMenuCloseTab(() => closeActiveTab()),
-      api.onSearchResults((results) => {
-        debugLog('onSearchResults received', results)
-        const totalMatches = results.reduce((acc, item) => acc + item.matches.length, 0)
+      api.onSearchResults((payload: SearchResponsePayload) => {
+        debugLog('onSearchResults received', payload)
+        const totalMatches = payload.results.reduce((acc, item) => acc + item.matches.length, 0)
+        const searchTab: SearchTab = {
+          kind: 'search',
+          id: payload.searchId,
+          title: buildSearchTabTitle(payload.request, totalMatches),
+          request: payload.request,
+          parentSearchId: payload.parentSearchId,
+          results: payload.results,
+          totalMatches,
+          isActive: true
+        }
+
         setTabs((prev) => {
-          const withoutSearch = prev.filter((tab) => tab.id !== SEARCH_TAB_ID)
-          const reset = withoutSearch.map((tab) => ({ ...tab, isActive: false }))
-          const searchTab: SearchTab = {
-            kind: 'search',
-            id: SEARCH_TAB_ID,
-            title: totalMatches ? `Search Results (${totalMatches})` : 'Search Results',
-            results,
-            totalMatches,
-            isActive: true
+          const withoutCurrent = prev.filter((tab) => tab.id !== payload.searchId)
+          const reset = withoutCurrent.map((tab) => ({ ...tab, isActive: false }))
+
+          const parentIndex = searchTab.parentSearchId
+            ? reset.findIndex((tab) => tab.id === searchTab.parentSearchId)
+            : -1
+
+          if (parentIndex >= 0) {
+            const before = reset.slice(0, parentIndex + 1)
+            const after = reset.slice(parentIndex + 1)
+            return [...before, searchTab, ...after]
           }
-          debugLog('onSearchResults computed searchTab', {
-            totalMatches,
-            resultsSummary: results.map((item) => ({
-              tabId: item.tabId,
-              title: item.title,
-              matches: item.matches.length
-            }))
-          })
+
           return [...reset, searchTab]
         })
-        updateActiveTab(SEARCH_TAB_ID)
+
+        updateActiveTab(payload.searchId)
       }),
       api.onSearchNavigate(({ tabId, line, column }) => {
         const exists = tabsRef.current.some((tab) => tab.id === tabId)
@@ -526,13 +568,26 @@ function TabManager(): React.JSX.Element {
   )
 
   useEffect(() => {
-    const searchTab = tabs.find(
-      (tab): tab is SearchTab => tab.id === SEARCH_TAB_ID && tab.kind === 'search'
-    )
-    if (searchTab) {
+    let context: ActiveContext
+    if (!activeTab) {
+      context = { kind: 'welcome' }
+    } else if (isFileTab(activeTab)) {
+      context = { kind: 'file', tabId: activeTab.id }
+    } else if (activeTab.kind === 'search') {
+      context = { kind: 'search', searchId: activeTab.id }
+    } else {
+      context = { kind: 'welcome' }
+    }
+    debugLog('updateActiveContext', context)
+    api.updateActiveContext(context)
+  }, [activeTab])
+
+  useEffect(() => {
+    if (activeTab && activeTab.kind === 'search') {
       debugLog('searchTab snapshot', {
-        totalMatches: searchTab.totalMatches,
-        results: searchTab.results.map((item) => ({
+        activeSearchId: activeTab.id,
+        totalMatches: activeTab.totalMatches,
+        results: activeTab.results.map((item) => ({
           title: item.title,
           matches: item.matches.length,
           matchPreview: item.matches[0]
@@ -544,11 +599,11 @@ function TabManager(): React.JSX.Element {
         searchContainerRef.current.style.opacity = '1'
       }
     }
-  }, [tabs])
+  }, [activeTab])
 
   useEffect(() => {
     const container = searchContainerRef.current
-    if (!container || activeTabId !== SEARCH_TAB_ID) {
+    if (!container || !activeTab || activeTab.kind !== 'search') {
       searchObserverRef.current?.disconnect()
       searchObserverRef.current = null
       return
@@ -623,10 +678,13 @@ function TabManager(): React.JSX.Element {
       <div className="flex h-full flex-col bg-slate-50">
         <div className="border-b border-slate-200 bg-white/70 px-6 py-4">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-500">
-            Search results
+            {tab.request.scope?.kind === 'search' ? 'Nested search' : 'Search results'}
           </p>
-          <h2 className="mt-1 text-lg font-semibold text-slate-800">Overview</h2>
-          <p className="mt-1 text-sm text-slate-500">{summary}</p>
+          <h2 className="mt-1 text-lg font-semibold text-slate-800">
+            {formatSearchQuery(tab.request)}
+          </h2>
+          <p className="mt-1 text-xs text-slate-400">{describeScopeDetail(tab.request)}</p>
+          <p className="mt-2 text-sm text-slate-500">{summary}</p>
         </div>
         <div
           ref={searchContainerRef}

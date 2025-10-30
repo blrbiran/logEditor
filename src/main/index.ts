@@ -4,6 +4,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { promises as fs } from 'fs'
+import { randomUUID } from 'crypto'
 
 type SearchableTab = {
   id: string
@@ -23,10 +24,20 @@ type SaveFilePayload = {
   defaultPath?: string
 }
 
+type SearchScope =
+  | {
+      kind: 'workspace'
+    }
+  | {
+      kind: 'search'
+      searchId: string
+    }
+
 type SearchRequest = {
   query: string
   isRegex: boolean
   matchCase: boolean
+  scope?: SearchScope
 }
 
 type SearchMatch = {
@@ -43,9 +54,44 @@ type SearchResponseItem = {
   matches: SearchMatch[]
 }
 
+type SearchResponsePayload = {
+  searchId: string
+  parentSearchId?: string
+  request: SearchRequest
+  results: SearchResponseItem[]
+}
+
+type ActiveContext =
+  | { kind: 'welcome' }
+  | { kind: 'file'; tabId: string }
+  | { kind: 'search'; searchId: string }
+
+type StoredSearchResultSet = {
+  searchId: string
+  parentSearchId?: string
+  request: SearchRequest
+  results: SearchResponseItem[]
+}
+
 let mainWindow: BrowserWindow | null = null
 let searchWindow: BrowserWindow | null = null
 const tabStore = new Map<string, SearchableTab>()
+const searchResultsStore = new Map<string, StoredSearchResultSet>()
+let activeContext: ActiveContext = { kind: 'welcome' }
+
+const generateSearchId = (): string => {
+  try {
+    return randomUUID()
+  } catch {
+    return `search-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
+  }
+}
+
+const sendSearchContextToWindow = (): void => {
+  if (searchWindow && !searchWindow.isDestroyed()) {
+    searchWindow.webContents.send('search:context', activeContext)
+  }
+}
 
 const getMainWindow = (): BrowserWindow | null => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -109,6 +155,7 @@ function createSearchWindow(): void {
 
   if (searchWindow && !searchWindow.isDestroyed()) {
     searchWindow.focus()
+    sendSearchContextToWindow()
     return
   }
 
@@ -136,6 +183,10 @@ function createSearchWindow(): void {
 
   searchWindow.on('closed', () => {
     searchWindow = null
+  })
+
+  searchWindow.webContents.once('did-finish-load', () => {
+    sendSearchContextToWindow()
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -360,36 +411,65 @@ function registerIpcHandlers(): void {
     return { canceled: false, filePath: targetPath }
   })
 
-  ipcMain.handle('perform-search', (_event, request: SearchRequest) => {
-    const { query, isRegex, matchCase } = request
-    if (!query.trim()) {
-      return []
+  ipcMain.handle('perform-search', (_event, request: SearchRequest): SearchResponsePayload => {
+    const scope = request.scope ?? { kind: 'workspace' }
+    const trimmedQuery = request.query.trim()
+    const normalizedRequest: SearchRequest = {
+      ...request,
+      query: trimmedQuery,
+      scope
     }
 
     let matcher: RegExp | null = null
-    if (isRegex) {
+    if (trimmedQuery.length && normalizedRequest.isRegex) {
       try {
-        matcher = new RegExp(query, matchCase ? 'g' : 'gi')
+        matcher = new RegExp(trimmedQuery, normalizedRequest.matchCase ? 'g' : 'gi')
       } catch (error) {
         console.error('Invalid regular expression', error)
         throw error
       }
     }
 
-    const results: SearchResponseItem[] = []
-    for (const tab of tabStore.values()) {
-      const matches = findMatches(tab.content, { query, isRegex, matchCase, matcher })
-      if (matches.length) {
-        results.push({
-          tabId: tab.id,
-          title: tab.title,
-          filePath: tab.filePath,
-          matches
-        })
+    const findOptions: FindMatchOptions = {
+      query: trimmedQuery,
+      isRegex: normalizedRequest.isRegex,
+      matchCase: normalizedRequest.matchCase,
+      matcher
+    }
+
+    let results: SearchResponseItem[] = []
+    if (!trimmedQuery.length) {
+      results = []
+    } else if (scope.kind === 'search') {
+      const base = searchResultsStore.get(scope.searchId)
+      if (base) {
+        results = filterSearchResults(base.results, findOptions)
+      } else {
+        results = []
+      }
+    } else {
+      for (const tab of tabStore.values()) {
+        const matches = findMatches(tab.content, findOptions)
+        if (matches.length) {
+          results.push({
+            tabId: tab.id,
+            title: tab.title,
+            filePath: tab.filePath,
+            matches
+          })
+        }
       }
     }
 
-    return results
+    const payload: SearchResponsePayload = {
+      searchId: generateSearchId(),
+      parentSearchId: scope.kind === 'search' ? scope.searchId : undefined,
+      request: normalizedRequest,
+      results
+    }
+
+    searchResultsStore.set(payload.searchId, payload)
+    return payload
   })
 
   ipcMain.on('sync-tab-state', (_event, tab: SearchableTab) => {
@@ -400,8 +480,8 @@ function registerIpcHandlers(): void {
     tabStore.delete(tabId)
   })
 
-  ipcMain.on('display-search-results', (_event, results: SearchResponseItem[]) => {
-    sendToRenderer('search:results', results)
+  ipcMain.on('display-search-results', (_event, payload: SearchResponsePayload) => {
+    sendToRenderer('search:results', payload)
   })
 
   ipcMain.on('navigate-to-file-line', (_event, payload: { tabId: string; line: number; column?: number }) => {
@@ -410,6 +490,15 @@ function registerIpcHandlers(): void {
 
   ipcMain.on('open-search-window', () => {
     createSearchWindow()
+  })
+
+  ipcMain.on('dispose-search-results', (_event, searchId: string) => {
+    searchResultsStore.delete(searchId)
+  })
+
+  ipcMain.on('update-active-context', (_event, context: ActiveContext) => {
+    activeContext = context
+    sendSearchContextToWindow()
   })
 }
 
@@ -463,4 +552,42 @@ function findMatches(content: string, options: FindMatchOptions): SearchMatch[] 
   })
 
   return matches
+}
+
+function filterSearchResults(
+  baseResults: SearchResponseItem[],
+  options: FindMatchOptions
+): SearchResponseItem[] {
+  if (!options.query.length) {
+    return []
+  }
+
+  const result: SearchResponseItem[] = []
+
+  baseResults.forEach((item) => {
+    const aggregatedMatches: SearchMatch[] = []
+
+    item.matches.forEach((match) => {
+      const nestedMatches = findMatches(match.preview, options)
+      nestedMatches.forEach((nested) => {
+        aggregatedMatches.push({
+          line: match.line,
+          column: nested.column,
+          match: nested.match,
+          preview: match.preview
+        })
+      })
+    })
+
+    if (aggregatedMatches.length > 0) {
+      result.push({
+        tabId: item.tabId,
+        title: item.title,
+        filePath: item.filePath,
+        matches: aggregatedMatches
+      })
+    }
+  })
+
+  return result
 }

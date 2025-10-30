@@ -19,10 +19,27 @@ type SearchResultItem = {
   matches: SearchMatch[]
 }
 
+type SearchScope =
+  | {
+      kind: 'workspace'
+    }
+  | {
+      kind: 'search'
+      searchId: string
+    }
+
 type SearchRequest = {
   query: string
   isRegex: boolean
   matchCase: boolean
+  scope?: SearchScope
+}
+
+type SearchResponsePayload = {
+  searchId: string
+  parentSearchId?: string
+  request: SearchRequest
+  results: SearchResultItem[]
 }
 
 type SaveFilePayload = {
@@ -37,6 +54,11 @@ type SearchableTab = {
   filePath?: string
   content: string
 }
+
+type ActiveContext =
+  | { kind: 'welcome' }
+  | { kind: 'file'; tabId: string }
+  | { kind: 'search'; searchId: string }
 
 const subscribe = <Payload>(
   channel: string,
@@ -59,7 +81,7 @@ const api = {
     invoke('open-file-dialog'),
   saveFileDialog: (payload: SaveFilePayload): Promise<{ canceled: boolean; filePath?: string }> =>
     invoke('save-file-dialog', payload),
-  performSearch: (payload: SearchRequest): Promise<SearchResultItem[]> =>
+  performSearch: (payload: SearchRequest): Promise<SearchResponsePayload> =>
     invoke('perform-search', payload),
   syncTabState: (tab: SearchableTab): void => {
     ipcRenderer.send('sync-tab-state', tab)
@@ -67,8 +89,8 @@ const api = {
   removeTabState: (tabId: string): void => {
     ipcRenderer.send('remove-tab-state', tabId)
   },
-  emitSearchResults: (results: SearchResultItem[]): void => {
-    ipcRenderer.send('display-search-results', results)
+  emitSearchResults: (payload: SearchResponsePayload): void => {
+    ipcRenderer.send('display-search-results', payload)
   },
   emitNavigateToLine: (payload: { tabId: string; line: number; column?: number }): void => {
     ipcRenderer.send('navigate-to-file-line', payload)
@@ -76,17 +98,25 @@ const api = {
   openSearchWindow: (): void => {
     ipcRenderer.send('open-search-window')
   },
+  disposeSearchResults: (searchId: string): void => {
+    ipcRenderer.send('dispose-search-results', searchId)
+  },
+  updateActiveContext: (context: ActiveContext): void => {
+    ipcRenderer.send('update-active-context', context)
+  },
   onMenuNewFile: (listener: () => void): RemoveListener => subscribe('menu:new-file', listener),
   onMenuOpenFile: (listener: () => void): RemoveListener => subscribe('menu:open-file', listener),
   onMenuSaveFile: (listener: () => void): RemoveListener => subscribe('menu:save-file', listener),
   onMenuSaveFileAs: (listener: () => void): RemoveListener =>
     subscribe('menu:save-file-as', listener),
   onMenuCloseTab: (listener: () => void): RemoveListener => subscribe('menu:close-tab', listener),
-  onSearchResults: (listener: (payload: SearchResultItem[]) => void): RemoveListener =>
+  onSearchResults: (listener: (payload: SearchResponsePayload) => void): RemoveListener =>
     subscribe('search:results', listener),
   onSearchNavigate: (
     listener: (payload: { tabId: string; line: number; column?: number }) => void
-  ): RemoveListener => subscribe('search:navigate', listener)
+  ): RemoveListener => subscribe('search:navigate', listener),
+  onSearchContext: (listener: (payload: ActiveContext) => void): RemoveListener =>
+    subscribe('search:context', listener)
 }
 
 const extendedElectronApi = {

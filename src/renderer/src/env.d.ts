@@ -16,10 +16,27 @@ export type SearchResultItem = {
   matches: SearchMatch[]
 }
 
+export type SearchScope =
+  | {
+      kind: 'workspace'
+    }
+  | {
+      kind: 'search'
+      searchId: string
+    }
+
 export type SearchRequest = {
   query: string
   isRegex: boolean
   matchCase: boolean
+  scope?: SearchScope
+}
+
+export type SearchResponsePayload = {
+  searchId: string
+  parentSearchId?: string
+  request: SearchRequest
+  results: SearchResultItem[]
 }
 
 export type SearchableTab = {
@@ -42,22 +59,30 @@ export type SaveFileResult = {
 
 export type RemoveListener = () => void
 
+export type ActiveContext =
+  | { kind: 'welcome' }
+  | { kind: 'file'; tabId: string }
+  | { kind: 'search'; searchId: string }
+
 export interface LogEditorApi {
   openFileDialog(): Promise<{ filePath: string; content: string }[]>
   saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
-  performSearch(payload: SearchRequest): Promise<SearchResultItem[]>
+  performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void
   removeTabState(tabId: string): void
-  emitSearchResults(results: SearchResultItem[]): void
+  emitSearchResults(payload: SearchResponsePayload): void
   emitNavigateToLine(payload: { tabId: string; line: number; column?: number }): void
   openSearchWindow(): void
+  disposeSearchResults(searchId: string): void
+  updateActiveContext(context: ActiveContext): void
   onMenuNewFile(listener: () => void): RemoveListener
   onMenuOpenFile(listener: () => void): RemoveListener
   onMenuSaveFile(listener: () => void): RemoveListener
   onMenuSaveFileAs(listener: () => void): RemoveListener
   onMenuCloseTab(listener: () => void): RemoveListener
-  onSearchResults(listener: (payload: SearchResultItem[]) => void): RemoveListener
+  onSearchResults(listener: (payload: SearchResponsePayload) => void): RemoveListener
   onSearchNavigate(listener: (payload: { tabId: string; line: number; column?: number }) => void): RemoveListener
+  onSearchContext(listener: (payload: ActiveContext) => void): RemoveListener
 }
 
 type ExtendedElectronAPI = ElectronAPI & {
