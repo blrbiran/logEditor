@@ -33,6 +33,7 @@ type SearchRequest = {
   isRegex: boolean
   matchCase: boolean
   scope?: SearchScope
+  excludeQuery?: string
 }
 
 type SearchResponsePayload = {

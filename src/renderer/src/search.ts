@@ -3,6 +3,7 @@ import type { ActiveContext, SearchRequest, SearchResponsePayload } from './env'
 
 const form = document.getElementById('search-form') as HTMLFormElement | null
 const queryInput = document.getElementById('query') as HTMLInputElement | null
+const excludeInput = document.getElementById('exclude-query') as HTMLInputElement | null
 const regexInput = document.getElementById('regex') as HTMLInputElement | null
 const matchCaseInput = document.getElementById('match-case') as HTMLInputElement | null
 const statusElement = document.getElementById('status') as HTMLParagraphElement | null
@@ -38,6 +39,7 @@ const handleSearch = async (): Promise<void> => {
   }
 
   const query = queryInput.value.trim()
+  const exclude = excludeInput?.value.trim() ?? ''
   if (!query) {
     setStatus('Please enter text to search.', 'error')
     return
@@ -47,6 +49,7 @@ const handleSearch = async (): Promise<void> => {
     query,
     isRegex: regexInput.checked,
     matchCase: matchCaseInput.checked,
+    excludeQuery: exclude.length ? exclude : undefined,
     scope:
       currentContext.kind === 'search'
         ? { kind: 'search', searchId: currentContext.searchId }

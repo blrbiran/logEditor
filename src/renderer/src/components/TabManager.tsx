@@ -93,11 +93,23 @@ const formatSearchQuery = (request: SearchRequest): string => {
 
 const buildSearchTabTitle = (request: SearchRequest, totalMatches: number): string => {
   const baseTitle = `${describeScope(request)}: ${formatSearchQuery(request)}`
-  return totalMatches ? `${baseTitle} (${totalMatches})` : baseTitle
+  const excludePart = formatExcludeQuery(request)
+  const decoratedTitle = excludePart ? `${baseTitle} – not ${excludePart}` : baseTitle
+  return totalMatches ? `${decoratedTitle} (${totalMatches})` : decoratedTitle
 }
 
 const describeScopeDetail = (request: SearchRequest): string =>
-  request.scope?.kind === 'search' ? 'Within previous search results' : 'Across open tabs'
+  `${request.scope?.kind === 'search' ? 'Within previous search results' : 'Across open tabs'}${
+    request.excludeQuery ? `, excluding ${formatExcludeQuery(request) ?? 'filtered terms'}` : ''
+  }`
+
+const formatExcludeQuery = (request: SearchRequest): string | null => {
+  if (!request.excludeQuery?.trim().length) {
+    return null
+  }
+  const trimmed = request.excludeQuery.trim()
+  return request.isRegex ? `/${truncate(trimmed)}/` : `"${truncate(trimmed)}"`
+}
 
 const debugLog = (...args: unknown[]): void => {
   if (import.meta.env.DEV) {
@@ -684,6 +696,11 @@ function TabManager(): React.JSX.Element {
             {formatSearchQuery(tab.request)}
           </h2>
           <p className="mt-1 text-xs text-slate-400">{describeScopeDetail(tab.request)}</p>
+          {tab.request.excludeQuery ? (
+            <p className="mt-1 text-xs font-medium text-rose-500">
+              Skipping lines containing {formatExcludeQuery(tab.request) ?? 'filtered terms'}
+            </p>
+          ) : null}
           <p className="mt-2 text-sm text-slate-500">{summary}</p>
         </div>
         <div

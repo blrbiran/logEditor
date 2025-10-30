@@ -38,6 +38,7 @@ type SearchRequest = {
   isRegex: boolean
   matchCase: boolean
   scope?: SearchScope
+  excludeQuery?: string
 }
 
 type SearchMatch = {
@@ -414,10 +415,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle('perform-search', (_event, request: SearchRequest): SearchResponsePayload => {
     const scope = request.scope ?? { kind: 'workspace' }
     const trimmedQuery = request.query.trim()
+    const trimmedExclude = request.excludeQuery?.trim() ?? ''
     const normalizedRequest: SearchRequest = {
       ...request,
       query: trimmedQuery,
-      scope
+      scope,
+      excludeQuery: trimmedExclude.length ? trimmedExclude : undefined
     }
 
     let matcher: RegExp | null = null
@@ -430,11 +433,26 @@ function registerIpcHandlers(): void {
       }
     }
 
+    let excludeMatcher: RegExp | null = null
+    if (normalizedRequest.excludeQuery && normalizedRequest.isRegex) {
+      try {
+        excludeMatcher = new RegExp(
+          normalizedRequest.excludeQuery,
+          normalizedRequest.matchCase ? 'g' : 'gi'
+        )
+      } catch (error) {
+        console.error('Invalid exclusion regular expression', error)
+        throw error
+      }
+    }
+
     const findOptions: FindMatchOptions = {
       query: trimmedQuery,
       isRegex: normalizedRequest.isRegex,
       matchCase: normalizedRequest.matchCase,
-      matcher
+      matcher,
+      excludeQuery: normalizedRequest.excludeQuery,
+      excludeMatcher
     }
 
     let results: SearchResponseItem[] = []
@@ -507,14 +525,38 @@ type FindMatchOptions = {
   isRegex: boolean
   matchCase: boolean
   matcher: RegExp | null
+  excludeQuery?: string
+  excludeMatcher: RegExp | null
 }
 
 function findMatches(content: string, options: FindMatchOptions): SearchMatch[] {
   const lines = content.split(/\r?\n/)
   const matches: SearchMatch[] = []
+  const excludeNeedle =
+    options.excludeQuery && !options.isRegex
+      ? options.matchCase
+        ? options.excludeQuery
+        : options.excludeQuery.toLowerCase()
+      : undefined
+
+  const shouldExcludeLine = (lineText: string): boolean => {
+    if (!options.excludeQuery) {
+      return false
+    }
+    if (options.isRegex && options.excludeMatcher) {
+      const tester = new RegExp(options.excludeMatcher.source, options.excludeMatcher.flags)
+      return tester.test(lineText)
+    }
+    const haystack = options.matchCase ? lineText : lineText.toLowerCase()
+    return excludeNeedle ? haystack.includes(excludeNeedle) : false
+  }
 
   lines.forEach((lineText, index) => {
     if (!lineText.length && !options.query.length) {
+      return
+    }
+
+    if (shouldExcludeLine(lineText)) {
       return
     }
 
