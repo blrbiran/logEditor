@@ -99,6 +99,9 @@ const api = {
   openSearchWindow: (): void => {
     ipcRenderer.send('open-search-window')
   },
+  focusMainWindow: (): void => {
+    ipcRenderer.send('focus-main-window')
+  },
   disposeSearchResults: (searchId: string): void => {
     ipcRenderer.send('dispose-search-results', searchId)
   },

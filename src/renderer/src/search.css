@@ -1,4 +1,5 @@
 :root {
+  --window-opacity: 1;
   color-scheme: light;
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-feature-settings: 'liga' on, 'calt' on;
@@ -19,6 +20,8 @@ body {
 body {
   background: linear-gradient(135deg, #eff6ff 0%, #faf5ff 45%, #ecfeff 100%);
   color: #0f172a;
+  opacity: var(--window-opacity);
+  transition: opacity 0.2s ease;
 }
 
 .search-shell {

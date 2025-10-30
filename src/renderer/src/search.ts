@@ -11,6 +11,12 @@ const statusElement = document.getElementById('status') as HTMLParagraphElement 
 type StatusState = 'idle' | 'pending' | 'success' | 'error'
 
 let currentContext: ActiveContext = { kind: 'welcome' }
+const WINDOW_ACTIVE_OPACITY = 1
+const WINDOW_BLUR_OPACITY = 0.5
+
+const applyWindowOpacity = (opacity: number): void => {
+  document.documentElement.style.setProperty('--window-opacity', opacity.toString())
+}
 
 const setStatus = (message: string, state: StatusState = 'idle'): void => {
   if (!statusElement) return
@@ -61,6 +67,7 @@ const handleSearch = async (): Promise<void> => {
       request.scope?.kind === 'search' ? 'Searching within previous results…' : 'Searching…',
       'pending'
     )
+    window.api.focusMainWindow()
     const payload = (await window.api.performSearch(request)) as SearchResponsePayload
     window.api.emitSearchResults(payload)
     const totalMatches = payload.results.reduce((acc, item) => acc + item.matches.length, 0)
@@ -83,6 +90,18 @@ window.api.onSearchContext((context) => {
   ensureIdleContextStatus()
 })
 
+const syncInitialOpacity = () => {
+  applyWindowOpacity(document.hasFocus() ? WINDOW_ACTIVE_OPACITY : WINDOW_BLUR_OPACITY)
+}
+
+window.addEventListener('focus', () => {
+  applyWindowOpacity(WINDOW_ACTIVE_OPACITY)
+})
+
+window.addEventListener('blur', () => {
+  applyWindowOpacity(WINDOW_BLUR_OPACITY)
+})
+
 if (form) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
@@ -95,5 +114,8 @@ if (queryInput) {
     queryInput.focus()
     queryInput.select()
     ensureIdleContextStatus()
+    syncInitialOpacity()
   })
+} else {
+  syncInitialOpacity()
 }

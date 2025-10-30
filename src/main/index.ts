@@ -162,7 +162,7 @@ function createSearchWindow(): void {
 
   searchWindow = new BrowserWindow({
     width: 420,
-    height: 440,
+    height: 528,
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -517,6 +517,15 @@ function registerIpcHandlers(): void {
   ipcMain.on('update-active-context', (_event, context: ActiveContext) => {
     activeContext = context
     sendSearchContextToWindow()
+  })
+
+  ipcMain.on('focus-main-window', () => {
+    const win = ensureMainWindow()
+    if (win.isMinimized()) {
+      win.restore()
+    }
+    win.focus()
+    win.show()
   })
 }
 

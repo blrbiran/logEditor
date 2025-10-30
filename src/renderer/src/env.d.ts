@@ -74,6 +74,7 @@ export interface LogEditorApi {
   emitSearchResults(payload: SearchResponsePayload): void
   emitNavigateToLine(payload: { tabId: string; line: number; column?: number }): void
   openSearchWindow(): void
+  focusMainWindow(): void
   disposeSearchResults(searchId: string): void
   updateActiveContext(context: ActiveContext): void
   onMenuNewFile(listener: () => void): RemoveListener
