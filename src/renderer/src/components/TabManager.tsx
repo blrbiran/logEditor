@@ -73,6 +73,21 @@ const api: LogEditorApi = window.api
 const SEARCH_TAB_ID = 'search-results-tab'
 const WELCOME_TAB_ID = 'welcome-tab'
 
+const debugLog = (...args: unknown[]): void => {
+  if (import.meta.env.DEV) {
+    // eslint-disable-next-line no-console
+    console.log('[TabManager]', ...args)
+  }
+}
+
+const generateTabId = (): string => {
+  const cryptoApi = globalThis.crypto as Crypto | undefined
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  return `tab-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
+}
+
 const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
   kind: 'welcome',
   id: WELCOME_TAB_ID,
@@ -101,11 +116,25 @@ function TabManager(): React.JSX.Element {
   }, [activeTabId])
 
   const updateActiveTab = useCallback((id: string | null) => {
+    debugLog('updateActiveTab', id)
     setActiveTabId(id)
     activeTabIdRef.current = id
   }, [])
 
   useEffect(() => {
+    debugLog(
+      'tabs changed',
+      tabs.map((tab) => ({
+        id: tab.id,
+        kind: tab.kind,
+        title: tab.title,
+        isActive: tab.isActive,
+        isDirty: isFileTab(tab) ? tab.isDirty : undefined,
+        filePath: isFileTab(tab) ? tab.filePath : undefined,
+        contentLength: isFileTab(tab) ? tab.content.length : undefined,
+        contentPreview: isFileTab(tab) ? tab.content.slice(0, 80) : undefined
+      }))
+    )
     tabs.filter(isFileTab).forEach((tab) => {
       api.syncTabState({
         id: tab.id,
@@ -153,6 +182,7 @@ function TabManager(): React.JSX.Element {
   useEffect(() => {
     return () => {
       if (highlightTimeoutRef.current) {
+        debugLog('cleanup highlight timeout')
         window.clearTimeout(highlightTimeoutRef.current)
       }
     }
@@ -162,6 +192,7 @@ function TabManager(): React.JSX.Element {
     const textarea = editorRefs.current[tabId]
     const overlay = highlightRefs.current[tabId]
     if (!textarea || !overlay) {
+      debugLog('focusLine skipped: missing elements', { tabId })
       return
     }
 
@@ -200,19 +231,22 @@ function TabManager(): React.JSX.Element {
 
     highlightInfoRef.current = { tabId, line: targetLine }
     if (highlightTimeoutRef.current) {
+      debugLog('clear existing highlight timeout', highlightTimeoutRef.current)
       window.clearTimeout(highlightTimeoutRef.current)
     }
     highlightTimeoutRef.current = window.setTimeout(() => {
+      debugLog('hide highlight', { tabId, line: targetLine })
       overlayEl.style.opacity = '0'
       highlightInfoRef.current = null
     }, 2000)
   }, [])
 
   const createNewTab = useCallback(() => {
-    const id = crypto.randomUUID()
+    const id = generateTabId()
     const title = `Untitled ${untitledCounterRef.current}`
     untitledCounterRef.current += 1
 
+    debugLog('createNewTab', { id, title })
     setTabs((prev) => {
       const reset = prev.map((tab) => ({ ...tab, isActive: false }))
       const newTab: FileTab = {
@@ -224,7 +258,12 @@ function TabManager(): React.JSX.Element {
         isDirty: false,
         isActive: true
       }
-      return [...reset, newTab]
+      const nextTabs = [...reset, newTab]
+      debugLog('createNewTab:setTabs', {
+        previousIds: prev.map((tab) => tab.id),
+        nextIds: nextTabs.map((tab) => tab.id)
+      })
+      return nextTabs
     })
     updateActiveTab(id)
   }, [updateActiveTab])
@@ -232,52 +271,68 @@ function TabManager(): React.JSX.Element {
   const openFiles = useCallback(async () => {
     const files = await api.openFileDialog()
     if (!files.length) {
+      debugLog('openFiles canceled or empty')
       return
     }
 
-    let nextActiveTabId: string | null = activeTabIdRef.current
-    setTabs((prev) => {
-      let updatedTabs = prev.map((tab) => ({ ...tab, isActive: false }))
-      let activeId = activeTabIdRef.current
+    debugLog('openFiles received', files.map((file) => file.filePath))
+    const currentTabs = tabsRef.current
+    let updatedTabs = currentTabs.map((tab) => ({ ...tab, isActive: false }))
+    let activeId = activeTabIdRef.current
 
-      files.forEach((file) => {
-        const existingIndex = updatedTabs.findIndex(
-          (tab) => isFileTab(tab) && tab.filePath === file.filePath
-        )
-        if (existingIndex >= 0) {
-          const existingTab = updatedTabs[existingIndex] as FileTab
-          const refreshedTab: FileTab = {
-            ...existingTab,
-            content: file.content,
-            isDirty: false,
-            isActive: true
-          }
-          updatedTabs[existingIndex] = refreshedTab
-          activeId = refreshedTab.id
-        } else {
-          const id = crypto.randomUUID()
-          const title = window.electron.path.basename(file.filePath)
-          const newTab: FileTab = {
-            kind: 'file',
-            id,
-            title,
-            filePath: file.filePath,
-            content: file.content,
-            isDirty: false,
-            isActive: true
-          }
-          updatedTabs = [...updatedTabs, newTab]
-          activeId = id
+    files.forEach((file) => {
+      const existingIndex = updatedTabs.findIndex(
+        (tab) => isFileTab(tab) && tab.filePath === file.filePath
+      )
+      if (existingIndex >= 0) {
+        const existingTab = updatedTabs[existingIndex] as FileTab
+        debugLog('openFiles refreshing existing tab', {
+          filePath: file.filePath,
+          tabId: existingTab.id
+        })
+        const refreshedTab: FileTab = {
+          ...existingTab,
+          content: file.content,
+          isDirty: false,
+          isActive: true
         }
-      })
-
-      nextActiveTabId = activeId ?? null
-      return updatedTabs
+        updatedTabs[existingIndex] = refreshedTab
+        activeId = refreshedTab.id
+      } else {
+        const id = generateTabId()
+        const title = window.electron.path.basename(file.filePath)
+        debugLog('openFiles creating new tab', {
+          filePath: file.filePath,
+          tabId: id,
+          title
+        })
+        const newTab: FileTab = {
+          kind: 'file',
+          id,
+          title,
+          filePath: file.filePath,
+          content: file.content,
+          isDirty: false,
+          isActive: true
+        }
+        updatedTabs = [...updatedTabs, newTab]
+        activeId = id
+      }
     })
+
+    const nextActiveTabId = activeId ?? updatedTabs.find((tab) => tab.isActive)?.id ?? null
+    debugLog('openFiles computed result', {
+      nextActiveTabId,
+      tabIds: updatedTabs.map((tab) => tab.id)
+    })
+
+    tabsRef.current = updatedTabs
+    setTabs(updatedTabs)
     updateActiveTab(nextActiveTabId)
   }, [updateActiveTab])
 
   const switchTab = useCallback((tabId: string) => {
+    debugLog('switchTab', tabId)
     setTabs((prev) =>
       prev.map((tab) => ({
         ...tab,
@@ -288,6 +343,7 @@ function TabManager(): React.JSX.Element {
   }, [updateActiveTab])
 
   const closeTab = useCallback((tabId: string) => {
+    debugLog('closeTab', tabId)
     let removedTab: Tab | undefined
     setTabs((prev) => {
       const target = prev.find((tab) => tab.id === tabId)
@@ -311,11 +367,13 @@ function TabManager(): React.JSX.Element {
     })
 
     if (removedTab && isFileTab(removedTab)) {
+      debugLog('closeTab removing tab state', removedTab.id)
       api.removeTabState(tabId)
     }
   }, [updateActiveTab])
 
   const updateTabContent = useCallback((tabId: string, content: string) => {
+    debugLog('updateTabContent', { tabId, length: content.length })
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === tabId && isFileTab(tab)
@@ -332,10 +390,12 @@ function TabManager(): React.JSX.Element {
   const closeActiveTab = useCallback(() => {
     const currentId = activeTabIdRef.current
     if (!currentId) {
+      debugLog('closeActiveTab skipped: no active tab')
       return
     }
     const currentTab = tabsRef.current.find((tab) => tab.id === currentId)
     if (!currentTab || isWelcomeTab(currentTab)) {
+      debugLog('closeActiveTab skipped: welcome or missing', currentId)
       return
     }
     closeTab(currentId)
@@ -347,6 +407,7 @@ function TabManager(): React.JSX.Element {
         (tab): tab is FileTab => tab.id === activeTabIdRef.current && isFileTab(tab)
       )
       if (!currentTab) {
+        debugLog('handleSave skipped: no current file tab')
         return
       }
 
@@ -358,10 +419,16 @@ function TabManager(): React.JSX.Element {
 
       const result: SaveFileResult = await api.saveFileDialog(payload)
       if (result.canceled || !result.filePath) {
+        debugLog('handleSave canceled or no file path', result)
         return
       }
 
       const newTitle = window.electron.path.basename(result.filePath)
+      debugLog('handleSave success', {
+        tabId: currentTab.id,
+        newFilePath: result.filePath,
+        newTitle
+      })
       setTabs((prev) =>
         prev.map((tab) =>
           tab.id === currentTab.id && isFileTab(tab)
@@ -380,6 +447,11 @@ function TabManager(): React.JSX.Element {
 
   const handleSearchResultSelect = useCallback(
     (result: SearchResultItem, match: SearchMatch) => {
+      debugLog('handleSearchResultSelect', {
+        tabId: result.tabId,
+        line: match.line,
+        column: match.column
+      })
       setTabs((prev) =>
         prev.map((tab) => ({
           ...tab,
@@ -441,6 +513,20 @@ function TabManager(): React.JSX.Element {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [tabs, activeTabId]
   )
+
+  useEffect(() => {
+    if (activeTab) {
+      debugLog('activeTab updated', {
+        activeTabId,
+        title: activeTab.title,
+        kind: activeTab.kind,
+        contentLength: isFileTab(activeTab) ? activeTab.content.length : undefined,
+        contentPreview: isFileTab(activeTab) ? activeTab.content.slice(0, 80) : undefined
+      })
+    } else {
+      debugLog('activeTab updated', { activeTabId, title: null })
+    }
+  }, [activeTabId, activeTab])
 
   const renderWelcomeContent = (): React.JSX.Element => (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-500">
