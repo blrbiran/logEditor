@@ -770,7 +770,7 @@ function TabManager(): React.JSX.Element {
                           type="button"
                           key={key}
                           className="group w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-sky-300 hover:bg-white"
-                          onClick={() => handleSearchResultSelect(result, match)}
+                          onDoubleClick={() => handleSearchResultSelect(result, match)}
                         >
                           <div className="rounded-lg bg-slate-900 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow transition group-hover:bg-slate-900/95">
                             <span className="mr-2 font-semibold text-sky-400">{match.line}:</span>
