@@ -205,8 +205,10 @@ function TabManager(): React.JSX.Element {
         overlay.style.opacity = '0'
         return
       }
-      const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight || '20')
-      const top = (highlight.line - 1) * lineHeight - textarea.scrollTop
+      const styles = getComputedStyle(textarea)
+      const lineHeight = parseFloat(styles.lineHeight || '20')
+      const paddingTop = parseFloat(styles.paddingTop || '0')
+      const top = paddingTop + (highlight.line - 1) * lineHeight - textarea.scrollTop
       overlay.style.top = `${Math.max(top, 0)}px`
       overlay.style.height = `${lineHeight}px`
     }
@@ -245,6 +247,9 @@ function TabManager(): React.JSX.Element {
     const textAreaEl = textarea
     const overlayEl = overlay
 
+    const styles = getComputedStyle(textAreaEl)
+    const lineHeight = parseFloat(styles.lineHeight || '20')
+    const paddingTop = parseFloat(styles.paddingTop || '0')
     const lines = textAreaEl.value.split(/\r?\n/)
     const targetLine = clamp(line, 1, Math.max(1, lines.length))
     const safeColumn = clamp(column, 1, (lines[targetLine - 1]?.length ?? 0) + 1)
@@ -258,14 +263,16 @@ function TabManager(): React.JSX.Element {
     textAreaEl.focus()
     textAreaEl.setSelectionRange(selectionStart, selectionStart)
 
-    const lineHeight = parseFloat(getComputedStyle(textAreaEl).lineHeight || '20')
     const visibleArea = textAreaEl.clientHeight
-    const desiredScrollTop = Math.max(0, (targetLine - 1) * lineHeight - visibleArea / 2)
+    const desiredScrollTop = Math.max(
+      0,
+      paddingTop + (targetLine - 1) * lineHeight - visibleArea / 2
+    )
 
     textAreaEl.scrollTop = desiredScrollTop
 
     const paintHighlight = (): void => {
-      const top = (targetLine - 1) * lineHeight - textAreaEl.scrollTop
+      const top = paddingTop + (targetLine - 1) * lineHeight - textAreaEl.scrollTop
       overlayEl.style.top = `${Math.max(top, 0)}px`
       overlayEl.style.height = `${lineHeight}px`
       overlayEl.style.opacity = '1'
