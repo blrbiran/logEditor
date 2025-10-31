@@ -815,8 +815,8 @@ function TabManager(): React.JSX.Element {
         ))}
       </nav>
 
-      <main className="flex-1 overflow-hidden bg-slate-100 p-4">
-        <div className="h-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <main className="flex-1 overflow-hidden bg-slate-100">
+        <div className="h-full overflow-hidden border border-slate-200 bg-white shadow-sm">
           {activeTab ? (
             isFileTab(activeTab) ? (
               <div className="relative h-full">
@@ -826,7 +826,7 @@ function TabManager(): React.JSX.Element {
                   }}
                   value={activeTab.content}
                   onChange={(event) => updateTabContent(activeTab.id, event.target.value)}
-                  className="editor-scrollbar h-full w-full resize-none bg-transparent p-6 font-mono text-sm leading-6 text-slate-900 outline-none"
+                  className="editor-scrollbar h-full w-full resize-none bg-transparent font-mono text-sm leading-6 text-slate-900 outline-none"
                   spellCheck={false}
                 />
                 <div
