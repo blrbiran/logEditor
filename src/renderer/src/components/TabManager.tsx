@@ -54,6 +54,7 @@ const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value))
 
 const MAX_SNIPPET_LENGTH = 160
+const LINE_NUMBER_GUTTER_WIDTH = 56
 
 const computeSnippet = (
   match: SearchMatch
@@ -142,6 +143,7 @@ function TabManager(): React.JSX.Element {
   const untitledCounterRef = useRef<number>(1)
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const lineNumberRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
   const highlightTimeoutRef = useRef<number | null>(null)
   const searchContainerRef = useRef<HTMLDivElement | null>(null)
@@ -198,8 +200,14 @@ function TabManager(): React.JSX.Element {
     if (!textarea || !overlay) {
       return
     }
+    overlay.style.left = `${LINE_NUMBER_GUTTER_WIDTH}px`
+    overlay.style.right = '0px'
 
     const updateOverlayPosition = (): void => {
+      const lineNumberEl = lineNumberRefs.current[activeTab.id] ?? null
+      if (lineNumberEl) {
+        lineNumberEl.style.transform = `translateY(-${textarea.scrollTop}px)`
+      }
       const highlight = highlightInfoRef.current
       if (!highlight || highlight.tabId !== activeTabId) {
         overlay.style.opacity = '0'
@@ -270,6 +278,10 @@ function TabManager(): React.JSX.Element {
     )
 
     textAreaEl.scrollTop = desiredScrollTop
+    const lineNumberEl = lineNumberRefs.current[tabId] ?? null
+    if (lineNumberEl) {
+      lineNumberEl.style.transform = `translateY(-${textAreaEl.scrollTop}px)`
+    }
 
     const paintHighlight = (): void => {
       const top = paddingTop + (targetLine - 1) * lineHeight - textAreaEl.scrollTop
@@ -586,6 +598,13 @@ function TabManager(): React.JSX.Element {
     [tabs, activeTabId]
   )
 
+  const activeFileLineNumbers = useMemo(() => {
+    if (!activeTab || !isFileTab(activeTab)) {
+      return []
+    }
+    return activeTab.content.split(/\r?\n/).map((_, index) => index + 1)
+  }, [activeTab])
+
   useEffect(() => {
     let context: ActiveContext
     if (!activeTab) {
@@ -820,20 +839,43 @@ function TabManager(): React.JSX.Element {
           {activeTab ? (
             isFileTab(activeTab) ? (
               <div className="relative h-full">
-                <textarea
-                  ref={(el) => {
-                    editorRefs.current[activeTab.id] = el
-                  }}
-                  value={activeTab.content}
-                  onChange={(event) => updateTabContent(activeTab.id, event.target.value)}
-                  className="editor-scrollbar h-full w-full resize-none bg-transparent font-mono text-sm leading-6 text-slate-900 outline-none"
-                  spellCheck={false}
-                />
+                <div className="flex h-full">
+                  <div className="relative h-full shrink-0 overflow-hidden border-r border-slate-200 bg-slate-100/80">
+                    <div
+                      ref={(el) => {
+                        lineNumberRefs.current[activeTab.id] = el
+                        if (el) {
+                          const textarea = editorRefs.current[activeTab.id]
+                          if (textarea) {
+                            el.style.transform = `translateY(-${textarea.scrollTop}px)`
+                          }
+                        }
+                      }}
+                      className="w-14 px-3 py-0 text-right font-mono text-xs leading-6 text-slate-400 will-change-transform"
+                    >
+                      {activeFileLineNumbers.map((lineNumber) => (
+                        <span key={`${activeTab.id}-line-${lineNumber}`} className="block leading-6">
+                          {lineNumber}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <textarea
+                    ref={(el) => {
+                      editorRefs.current[activeTab.id] = el
+                    }}
+                    value={activeTab.content}
+                    onChange={(event) => updateTabContent(activeTab.id, event.target.value)}
+                    className="editor-scrollbar h-full w-full resize-none bg-transparent p-0 font-mono text-sm leading-6 text-slate-900 outline-none"
+                    spellCheck={false}
+                  />
+                </div>
                 <div
                   ref={(el) => {
                     highlightRefs.current[activeTab.id] = el
                   }}
-                  className="pointer-events-none absolute left-0 right-0 bg-amber-200/60 opacity-0 transition-opacity"
+                  className="pointer-events-none absolute right-0 bg-amber-200/60 opacity-0 transition-opacity"
+                  style={{ left: `${LINE_NUMBER_GUTTER_WIDTH}px` }}
                 />
               </div>
             ) : (
