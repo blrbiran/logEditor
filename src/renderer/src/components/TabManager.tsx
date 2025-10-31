@@ -755,7 +755,7 @@ function TabManager(): React.JSX.Element {
                       {result.matches.length} match{result.matches.length === 1 ? '' : 'es'}
                     </span>
                   </div>
-                  <div className="mt-4 space-y-2 text-xs">
+                  <div className="mt-2 text-xs">
                     {result.matches.map((match, index) => {
                       const key = `${result.tabId}-${match.line}-${index}`
                       const snippet = computeSnippet(match)
@@ -766,21 +766,25 @@ function TabManager(): React.JSX.Element {
                         snippet
                       })
                       return (
-                        <button
-                          type="button"
+                        <div
                           key={key}
-                          className="group w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-sky-300 hover:bg-white"
+                          className="border border-transparent bg-transparent font-mono text-xs leading-5 text-slate-700 transition hover:bg-sky-50"
+                          role="button"
+                          tabIndex={0}
                           onDoubleClick={() => handleSearchResultSelect(result, match)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              handleSearchResultSelect(result, match)
+                            }
+                          }}
                         >
-                          <div className="rounded-lg bg-slate-900 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow transition group-hover:bg-slate-900/95">
-                            <span className="mr-2 font-semibold text-sky-400">{match.line}:</span>
-                            <span className="text-slate-300">{snippet.before || ' '}</span>
-                            <span className="rounded bg-amber-300 px-1 font-semibold text-slate-900">
-                              {snippet.highlight || '(empty match)'}
-                            </span>
-                            <span className="text-slate-300">{snippet.after || ' '}</span>
-                          </div>
-                        </button>
+                          <span className="mr-2 font-semibold text-sky-500">{match.line}:</span>
+                          <span className="text-slate-400">{snippet.before}</span>
+                          <span className="rounded bg-amber-200 px-1 font-semibold text-slate-900">
+                            {snippet.highlight || '(empty match)'}
+                          </span>
+                          <span className="text-slate-400">{snippet.after}</span>
+                        </div>
                       )
                     })}
                   </div>
