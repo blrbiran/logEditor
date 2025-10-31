@@ -746,12 +746,8 @@ function TabManager(): React.JSX.Element {
                           className="group w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-sky-300 hover:bg-white"
                           onClick={() => handleSearchResultSelect(result, match)}
                         >
-                          <div className="flex items-center gap-3 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                            <span>Line {match.line}</span>
-                            <span>•</span>
-                            <span>Col {match.column}</span>
-                          </div>
-                          <div className="mt-2 rounded-lg bg-slate-900 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow transition group-hover:bg-slate-900/95">
+                          <div className="rounded-lg bg-slate-900 px-3 py-2 font-mono text-xs leading-6 text-slate-100 shadow transition group-hover:bg-slate-900/95">
+                            <span className="mr-2 font-semibold text-sky-400">{match.line}:</span>
                             <span className="text-slate-300">{snippet.before || ' '}</span>
                             <span className="rounded bg-amber-300 px-1 font-semibold text-slate-900">
                               {snippet.highlight || '(empty match)'}
