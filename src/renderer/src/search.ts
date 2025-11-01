@@ -6,6 +6,7 @@ const queryInput = document.getElementById('query') as HTMLInputElement | null
 const excludeInput = document.getElementById('exclude-query') as HTMLInputElement | null
 const regexInput = document.getElementById('regex') as HTMLInputElement | null
 const matchCaseInput = document.getElementById('match-case') as HTMLInputElement | null
+const dedupeInput = document.getElementById('dedupe-lines') as HTMLInputElement | null
 const statusElement = document.getElementById('status') as HTMLParagraphElement | null
 
 type StatusState = 'idle' | 'pending' | 'success' | 'error'
@@ -55,6 +56,7 @@ const handleSearch = async (): Promise<void> => {
     query,
     isRegex: regexInput.checked,
     matchCase: matchCaseInput.checked,
+    dedupeLines: dedupeInput ? dedupeInput.checked : true,
     excludeQuery: exclude.length ? exclude : undefined,
     scope:
       currentContext.kind === 'search'

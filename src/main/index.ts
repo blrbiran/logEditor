@@ -39,6 +39,7 @@ type SearchRequest = {
   matchCase: boolean
   scope?: SearchScope
   excludeQuery?: string
+  dedupeLines?: boolean
 }
 
 type SearchMatch = {
@@ -420,7 +421,8 @@ function registerIpcHandlers(): void {
       ...request,
       query: trimmedQuery,
       scope,
-      excludeQuery: trimmedExclude.length ? trimmedExclude : undefined
+      excludeQuery: trimmedExclude.length ? trimmedExclude : undefined,
+      dedupeLines: request.dedupeLines ?? true
     }
 
     let matcher: RegExp | null = null

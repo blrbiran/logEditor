@@ -34,6 +34,7 @@ type SearchRequest = {
   matchCase: boolean
   scope?: SearchScope
   excludeQuery?: string
+  dedupeLines?: boolean
 }
 
 type SearchResponsePayload = {

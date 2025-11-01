@@ -31,6 +31,7 @@ export type SearchRequest = {
   matchCase: boolean
   scope?: SearchScope
   excludeQuery?: string
+  dedupeLines?: boolean
 }
 
 export type SearchResponsePayload = {

@@ -56,6 +56,17 @@ const clamp = (value: number, min: number, max: number): number =>
 const MAX_SNIPPET_LENGTH = 160
 const LINE_NUMBER_GUTTER_WIDTH = 56
 
+type HighlightSegment = {
+  text: string
+  isMatch: boolean
+}
+
+type GroupedMatches = {
+  line: number
+  preview: string
+  matches: SearchMatch[]
+}
+
 const computeSnippet = (
   match: SearchMatch
 ): { before: string; highlight: string; after: string } => {
@@ -73,6 +84,73 @@ const computeSnippet = (
   }
 
   return { before, highlight, after }
+}
+
+const sortMatchesByColumn = (matches: SearchMatch[]): SearchMatch[] =>
+  [...matches].sort((a, b) => a.column - b.column)
+
+const groupMatchesByLine = (matches: SearchMatch[], dedupeLines: boolean): GroupedMatches[] => {
+  if (!dedupeLines) {
+    return matches.map((match) => ({
+      line: match.line,
+      preview: match.preview,
+      matches: [match]
+    }))
+  }
+
+  const groups = new Map<string, GroupedMatches>()
+  matches.forEach((match) => {
+    const key = `${match.line}::${match.preview}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.matches.push(match)
+    } else {
+      groups.set(key, {
+        line: match.line,
+        preview: match.preview,
+        matches: [match]
+      })
+    }
+  })
+
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    matches: sortMatchesByColumn(group.matches)
+  }))
+}
+
+const buildHighlightSegments = (preview: string, matches: SearchMatch[]): HighlightSegment[] => {
+  const safePreview = preview ?? ''
+  const sortedMatches = sortMatchesByColumn(matches)
+  const segments: HighlightSegment[] = []
+  let cursor = 0
+
+  sortedMatches.forEach((match) => {
+    const startIndex = clamp(match.column - 1, 0, safePreview.length)
+    if (startIndex > cursor) {
+      segments.push({ text: safePreview.slice(cursor, startIndex), isMatch: false })
+    }
+
+    const matchLength = Math.max(match.match.length, 1)
+    const endIndex = clamp(startIndex + matchLength, startIndex, safePreview.length)
+    const highlightText = safePreview.slice(startIndex, endIndex)
+
+    if (highlightText.length > 0) {
+      segments.push({ text: highlightText, isMatch: true })
+    } else if (match.match.length > 0) {
+      segments.push({ text: match.match, isMatch: true })
+    } else {
+      segments.push({ text: '', isMatch: true })
+    }
+
+    cursor = Math.max(cursor, endIndex)
+  })
+
+  if (cursor < safePreview.length) {
+    segments.push({ text: safePreview.slice(cursor), isMatch: false })
+  }
+
+  return segments.length ? segments : (safePreview.length ? [{ text: safePreview, isMatch: false }] : [])
 }
 
 const api: LogEditorApi = window.api
@@ -712,6 +790,8 @@ function TabManager(): React.JSX.Element {
         }`
       : 'No matches yet — try adjusting your query.'
 
+    const dedupeLines = tab.request.dedupeLines ?? true
+
     return (
       <div className="flex h-full flex-col bg-slate-50">
         <div className="border-b border-slate-200 bg-white/70 px-6 py-4">
@@ -756,37 +836,68 @@ function TabManager(): React.JSX.Element {
                     </span>
                   </div>
                   <div className="mt-2 text-xs">
-                    {result.matches.map((match, index) => {
-                      const key = `${result.tabId}-${match.line}-${index}`
-                      const snippet = computeSnippet(match)
-                      debugLog('rendering search match', {
-                        tabTitle: result.title,
-                        matchLine: match.line,
-                        matchColumn: match.column,
-                        snippet
-                      })
-                      return (
-                        <div
-                          key={key}
-                          className="border border-transparent bg-transparent font-mono text-xs leading-5 text-slate-700 transition hover:bg-sky-50"
-                          role="button"
-                          tabIndex={0}
-                          onDoubleClick={() => handleSearchResultSelect(result, match)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter') {
-                              handleSearchResultSelect(result, match)
-                            }
-                          }}
-                        >
-                          <span className="mr-2 font-semibold text-sky-500">{match.line}:</span>
-                          <span className="text-slate-400">{snippet.before}</span>
-                          <span className="rounded bg-amber-200 px-1 font-semibold text-slate-900">
-                            {snippet.highlight || '(empty match)'}
-                          </span>
-                          <span className="text-slate-400">{snippet.after}</span>
-                        </div>
-                      )
-                    })}
+                    {groupMatchesByLine(result.matches, dedupeLines).map(
+                      (group, index) => {
+                        const primaryMatch = group.matches[0]
+                        if (!primaryMatch) {
+                          return null
+                        }
+                        const key = `${result.tabId}-${group.line}-${index}`
+                        const snippet = dedupeLines ? null : computeSnippet(primaryMatch)
+                        const segments = dedupeLines
+                          ? buildHighlightSegments(group.preview, group.matches)
+                          : null
+                        debugLog('rendering search match', {
+                          tabTitle: result.title,
+                          matchLine: primaryMatch.line,
+                          matchColumn: primaryMatch.column,
+                          dedupeEnabled: dedupeLines,
+                          matchesInLine: group.matches.length,
+                          snippet: snippet ?? segments
+                        })
+                        return (
+                          <div
+                            key={key}
+                            className="border border-transparent bg-transparent font-mono text-xs leading-5 text-slate-700 transition hover:bg-sky-50"
+                            role="button"
+                            tabIndex={0}
+                            onDoubleClick={() => handleSearchResultSelect(result, primaryMatch)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                handleSearchResultSelect(result, primaryMatch)
+                              }
+                            }}
+                          >
+                            <span className="mr-2 font-semibold text-sky-500">{group.line}:</span>
+                            {dedupeLines && segments
+                              ? segments.map((segment, segmentIndex) => (
+                                  <span
+                                    // eslint-disable-next-line react/no-array-index-key
+                                    key={`${key}-segment-${segmentIndex}`}
+                                    className={
+                                      segment.isMatch
+                                        ? 'rounded bg-amber-200 px-1 font-semibold text-slate-900'
+                                        : 'text-slate-400'
+                                    }
+                                  >
+                                    {segment.text}
+                                  </span>
+                                ))
+                              : (
+                                  <>
+                                    <span className="text-slate-400">
+                                      {snippet?.before}
+                                    </span>
+                                    <span className="rounded bg-amber-200 px-1 font-semibold text-slate-900">
+                                      {snippet?.highlight || '(empty match)'}
+                                    </span>
+                                    <span className="text-slate-400">{snippet?.after}</span>
+                                  </>
+                                )}
+                          </div>
+                        )
+                      }
+                    )}
                   </div>
                 </div>
               )
