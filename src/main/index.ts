@@ -619,8 +619,15 @@ function filterSearchResults(
 
   baseResults.forEach((item) => {
     const aggregatedMatches: SearchMatch[] = []
+    const processedLines = new Set<string>()
 
     item.matches.forEach((match) => {
+      const key = `${match.line}::${match.preview}`
+      if (processedLines.has(key)) {
+        return
+      }
+      processedLines.add(key)
+
       const nestedMatches = findMatches(match.preview, options)
       nestedMatches.forEach((nested) => {
         aggregatedMatches.push({
