@@ -1,0 +1,2 @@
+export const LINE_NUMBER_GUTTER_WIDTH = 56
+export const MAX_SNIPPET_LENGTH = 160

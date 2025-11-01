@@ -2,65 +2,16 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { basename } from 'path'
-
-type RemoveListener = () => void
-
-type SearchMatch = {
-  line: number
-  column: number
-  match: string
-  preview: string
-}
-
-type SearchResultItem = {
-  tabId: string
-  title: string
-  filePath?: string
-  matches: SearchMatch[]
-}
-
-type SearchScope =
-  | {
-      kind: 'workspace'
-    }
-  | {
-      kind: 'search'
-      searchId: string
-    }
-
-type SearchRequest = {
-  query: string
-  isRegex: boolean
-  matchCase: boolean
-  scope?: SearchScope
-  excludeQuery?: string
-  dedupeLines?: boolean
-}
-
-type SearchResponsePayload = {
-  searchId: string
-  parentSearchId?: string
-  request: SearchRequest
-  results: SearchResultItem[]
-}
-
-type SaveFilePayload = {
-  filePath?: string
-  defaultPath?: string
-  content: string
-}
-
-type SearchableTab = {
-  id: string
-  title: string
-  filePath?: string
-  content: string
-}
-
-type ActiveContext =
-  | { kind: 'welcome' }
-  | { kind: 'file'; tabId: string }
-  | { kind: 'search'; searchId: string }
+import type {
+  ActiveContext,
+  LogEditorApi,
+  RemoveListener,
+  SaveFilePayload,
+  SaveFileResult,
+  SearchRequest,
+  SearchResponsePayload,
+  SearchableTab
+} from '../common/ipc'
 
 const subscribe = <Payload>(
   channel: string,
@@ -78,13 +29,10 @@ const invoke = <Result>(channel: string, payload?: unknown): Promise<Result> => 
 }
 
 // Custom APIs for renderer
-const api = {
-  openFileDialog: (): Promise<{ filePath: string; content: string }[]> =>
-    invoke('open-file-dialog'),
-  saveFileDialog: (payload: SaveFilePayload): Promise<{ canceled: boolean; filePath?: string }> =>
-    invoke('save-file-dialog', payload),
-  performSearch: (payload: SearchRequest): Promise<SearchResponsePayload> =>
-    invoke('perform-search', payload),
+const api: LogEditorApi = {
+  openFileDialog: () => invoke<{ filePath: string; content: string }[]>('open-file-dialog'),
+  saveFileDialog: (payload: SaveFilePayload) => invoke<SaveFileResult>('save-file-dialog', payload),
+  performSearch: (payload: SearchRequest) => invoke<SearchResponsePayload>('perform-search', payload),
   syncTabState: (tab: SearchableTab): void => {
     ipcRenderer.send('sync-tab-state', tab)
   },
