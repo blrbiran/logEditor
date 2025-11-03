@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import type { LogEditorApi, SearchMatch, SearchResultItem } from '@renderer/env'
+import type { DragEvent as ReactDragEvent } from 'react'
+import type { LogEditorApi, OpenedFile, SearchMatch, SearchResultItem } from '@renderer/env'
 import { SearchResultsPanel } from './tab-manager/SearchResultsPanel'
 import { LINE_NUMBER_GUTTER_WIDTH } from './tab-manager/constants'
 import { clamp } from './tab-manager/helpers'
@@ -13,6 +14,92 @@ import {
 } from './tab-manager/tab-types'
 
 const api: LogEditorApi = window.api
+
+const decodeUriList = (uriList: string | null | undefined): string[] => {
+  if (!uriList) {
+    return []
+  }
+  return uriList
+    .split('\n')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith('file://'))
+    .map((entry) => {
+      try {
+        return decodeURI(entry.replace('file://', ''))
+      } catch {
+        return ''
+      }
+    })
+    .filter((entry) => entry.length > 0)
+}
+
+const collectDroppedFilePaths = (transfer: DataTransfer | null): string[] => {
+  if (!transfer) {
+    return []
+  }
+
+  const filePaths = new Set<string>()
+  Array.from(transfer.files ?? []).forEach((file) => {
+    const fileWithPath = file as File & { path?: string }
+    if (fileWithPath.path) {
+      filePaths.add(fileWithPath.path)
+    }
+  })
+
+  decodeUriList(transfer.getData('text/uri-list')).forEach((path) => {
+    if (path) {
+      filePaths.add(path)
+    }
+  })
+
+  const plainText = transfer.getData('text/plain')
+  if (plainText) {
+    plainText
+      .split('\n')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.startsWith('/'))
+      .forEach((entry) => filePaths.add(entry))
+  }
+
+  return Array.from(filePaths)
+}
+
+const collectFilesFromDataTransfer = async (transfer: DataTransfer | null): Promise<OpenedFile[]> => {
+  if (!transfer) {
+    return []
+  }
+
+  const files = Array.from(transfer.files ?? [])
+  if (!files.length) {
+    return []
+  }
+
+  const results: OpenedFile[] = []
+
+  await Promise.all(
+    files.map(async (file) => {
+      try {
+        const content = await file.text()
+        const potentialPath = (file as File & { path?: string }).path
+        const normalizedPath =
+          typeof potentialPath === 'string' && potentialPath.length > 0 ? potentialPath : undefined
+        const name = file.name || (normalizedPath ? window.electron.path.basename(normalizedPath) : 'Dropped File')
+        results.push({
+          filePath: normalizedPath,
+          name,
+          content
+        })
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.error('[TabManager] failed to read dropped file', error)
+        }
+      }
+    })
+  )
+
+  return results
+}
 
 function TabManager(): React.JSX.Element {
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
@@ -30,6 +117,8 @@ function TabManager(): React.JSX.Element {
     tabsRef,
     activeTabIdRef,
     createNewTab,
+    openFilesFromPaths,
+    openFilesFromContent,
     switchTab,
     closeTab,
     updateTabContent,
@@ -158,6 +247,50 @@ function TabManager(): React.JSX.Element {
     }
   }, [focusLine, switchTab, tabsRef])
 
+  const handleDragOver = useCallback((event: ReactDragEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
+  const handleDrop = useCallback(
+    (event: ReactDragEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const transfer = event.nativeEvent?.dataTransfer ?? event.dataTransfer ?? null
+      const filePaths = collectDroppedFilePaths(transfer)
+      if (filePaths.length) {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.log('[TabManager] drop received (paths)', filePaths)
+        }
+        void openFilesFromPaths(filePaths)
+        return
+      }
+
+      void (async () => {
+        const fallbackFiles = await collectFilesFromDataTransfer(transfer)
+        if (fallbackFiles.length) {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.log('[TabManager] drop received (blob)', fallbackFiles.map((file) => file.name))
+          }
+          openFilesFromContent(fallbackFiles)
+          return
+        }
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn('[TabManager] drop ignored (no readable files)', {
+            types: transfer?.types
+          })
+        }
+      })()
+    },
+    [openFilesFromContent, openFilesFromPaths]
+  )
+
   const activeFileLineNumbers = useMemo(() => {
     if (!activeTab || !isFileTab(activeTab)) {
       return []
@@ -276,6 +409,8 @@ function TabManager(): React.JSX.Element {
               }}
               value={tab.content}
               onChange={(event) => updateTabContent(tab.id, event.target.value)}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
               className="editor-scrollbar h-full w-full resize-none bg-transparent p-0 font-mono text-sm leading-6 text-slate-900 outline-none"
               spellCheck={false}
             />
@@ -300,7 +435,11 @@ function TabManager(): React.JSX.Element {
   }
 
   return (
-    <div className="relative flex h-full flex-col bg-slate-50 text-slate-900">
+    <div
+      className="relative flex h-full flex-col bg-slate-50 text-slate-900"
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <nav
         className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-2 py-2"
         onDoubleClick={(event) => {

@@ -1,8 +1,16 @@
 import { ipcMain, dialog } from 'electron'
 import { promises as fs } from 'fs'
+import { basename } from 'path'
 import type { WindowManager } from './window-manager'
 import type { SearchService } from './search-service'
-import type { ActiveContext, SaveFilePayload, SearchRequest, SearchResponsePayload, SearchableTab } from '../common/ipc'
+import type {
+  ActiveContext,
+  OpenedFile,
+  SaveFilePayload,
+  SearchRequest,
+  SearchResponsePayload,
+  SearchableTab
+} from '../common/ipc'
 
 type RegisterIpcDeps = {
   windowManager: WindowManager
@@ -10,9 +18,35 @@ type RegisterIpcDeps = {
   setActiveContext: (context: ActiveContext) => void
 }
 
-type OpenFileResult = {
-  filePath: string
-  content: string
+const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
+  const results: OpenedFile[] = []
+  const seen = new Set<string>()
+
+  for (const filePath of filePaths) {
+    if (!filePath || seen.has(filePath)) {
+      continue
+    }
+    seen.add(filePath)
+
+    try {
+      const stats = await fs.stat(filePath)
+      if (!stats.isFile()) {
+        continue
+      }
+    } catch (error) {
+      console.error(`Failed to access file: ${filePath}`, error)
+      continue
+    }
+
+    try {
+      const content = await fs.readFile(filePath, 'utf-8')
+      results.push({ filePath, name: basename(filePath), content })
+    } catch (error) {
+      console.error(`Failed to read file: ${filePath}`, error)
+    }
+  }
+
+  return results
 }
 
 export const registerIpcHandlers = ({
@@ -37,17 +71,18 @@ export const registerIpcHandlers = ({
       return []
     }
 
-    const results: OpenFileResult[] = []
-    for (const filePath of filePaths) {
-      try {
-        const content = await fs.readFile(filePath, 'utf-8')
-        results.push({ filePath, content })
-      } catch (error) {
-        console.error(`Failed to read file: ${filePath}`, error)
-      }
-    }
+    return readFiles(filePaths)
+  })
 
-    return results
+  ipcMain.handle('read-files-from-paths', async (_event, maybePaths: unknown) => {
+    if (!Array.isArray(maybePaths)) {
+      return []
+    }
+    const filePaths = maybePaths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    if (!filePaths.length) {
+      return []
+    }
+    return readFiles(filePaths)
   })
 
   ipcMain.handle('save-file-dialog', async (_event, payload: SaveFilePayload) => {

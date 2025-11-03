@@ -4,6 +4,7 @@ import type { ElectronAPI } from '@electron-toolkit/preload'
 import type {
   ActiveContext,
   LogEditorApi,
+  OpenedFile,
   RemoveListener,
   SaveFilePayload,
   SaveFileResult,
@@ -18,6 +19,7 @@ import type {
 export type {
   ActiveContext,
   LogEditorApi,
+  OpenedFile,
   RemoveListener,
   SaveFilePayload,
   SaveFileResult,

@@ -59,13 +59,20 @@ export type SaveFileResult = {
   filePath?: string
 }
 
+export type OpenedFile = {
+  filePath?: string
+  name: string
+  content: string
+}
+
 export type ActiveContext =
   | { kind: 'welcome' }
   | { kind: 'file'; tabId: string }
   | { kind: 'search'; searchId: string }
 
 export interface LogEditorApi {
-  openFileDialog(): Promise<{ filePath: string; content: string }[]>
+  openFileDialog(): Promise<OpenedFile[]>
+  readFilesFromPaths(filePaths: string[]): Promise<OpenedFile[]>
   saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
   performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void

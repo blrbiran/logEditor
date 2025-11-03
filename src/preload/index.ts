@@ -5,6 +5,7 @@ import { basename } from 'path'
 import type {
   ActiveContext,
   LogEditorApi,
+  OpenedFile,
   RemoveListener,
   SaveFilePayload,
   SaveFileResult,
@@ -30,7 +31,8 @@ const invoke = <Result>(channel: string, payload?: unknown): Promise<Result> => 
 
 // Custom APIs for renderer
 const api: LogEditorApi = {
-  openFileDialog: () => invoke<{ filePath: string; content: string }[]>('open-file-dialog'),
+  openFileDialog: () => invoke<OpenedFile[]>('open-file-dialog'),
+  readFilesFromPaths: (filePaths: string[]) => invoke<OpenedFile[]>('read-files-from-paths', filePaths),
   saveFileDialog: (payload: SaveFilePayload) => invoke<SaveFileResult>('save-file-dialog', payload),
   performSearch: (payload: SearchRequest) => invoke<SearchResponsePayload>('perform-search', payload),
   syncTabState: (tab: SearchableTab): void => {

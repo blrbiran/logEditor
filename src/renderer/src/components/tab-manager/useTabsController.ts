@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   LogEditorApi,
+  OpenedFile,
   SaveFileResult,
   SearchMatch,
   SearchResponsePayload,
@@ -37,6 +38,8 @@ type UseTabsControllerResult = {
   activeTabIdRef: React.MutableRefObject<string | null>
   createNewTab(): void
   openFiles(): Promise<void>
+  openFilesFromPaths(filePaths: string[]): Promise<void>
+  openFilesFromContent(files: OpenedFile[]): void
   switchTab(tabId: string): void
   closeTab(tabId: string): void
   closeActiveTab(): void
@@ -153,6 +156,74 @@ export const useTabsController = (): UseTabsControllerResult => {
     updateActiveTab(id)
   }, [updateActiveTab])
 
+  const applyOpenedFiles = useCallback(
+    (files: OpenedFile[]) => {
+      if (!files.length) {
+        debugLog('applyOpenedFiles received empty payload')
+        return
+      }
+
+      const currentTabs = tabsRef.current
+      let updatedTabs = currentTabs.map((tab) => ({ ...tab, isActive: false }))
+      let activeId = activeTabIdRef.current
+
+      files.forEach((file) => {
+        const filePath = file.filePath
+        const fileName = file.name || (filePath ? window.electron.path.basename(filePath) : 'Untitled')
+        const existingIndex =
+          filePath != null && filePath.length > 0
+            ? updatedTabs.findIndex((tab) => isFileTab(tab) && tab.filePath === filePath)
+            : -1
+
+        if (existingIndex >= 0) {
+          const existingTab = updatedTabs[existingIndex] as FileTab
+          debugLog('applyOpenedFiles refreshing existing tab', {
+            filePath,
+            tabId: existingTab.id
+          })
+          const refreshedTab: FileTab = {
+            ...existingTab,
+            content: file.content,
+            title: fileName,
+            isDirty: false,
+            isActive: true
+          }
+          updatedTabs[existingIndex] = refreshedTab
+          activeId = refreshedTab.id
+        } else {
+          const id = generateTabId()
+          debugLog('applyOpenedFiles creating new tab', {
+            filePath,
+            tabId: id,
+            title: fileName
+          })
+          const newTab: FileTab = {
+            kind: 'file',
+            id,
+            title: fileName,
+            filePath: filePath && filePath.length > 0 ? filePath : undefined,
+            content: file.content,
+            isDirty: false,
+            isActive: true
+          }
+          updatedTabs = [...updatedTabs, newTab]
+          activeId = id
+        }
+      })
+
+      const nextActiveTabId = activeId ?? updatedTabs.find((tab) => tab.isActive)?.id ?? null
+      debugLog('applyOpenedFiles computed result', {
+        nextActiveTabId,
+        tabIds: updatedTabs.map((tab) => tab.id)
+      })
+
+      tabsRef.current = updatedTabs
+      setTabs(updatedTabs)
+      updateActiveTab(nextActiveTabId)
+    },
+    [updateActiveTab]
+  )
+
   const openFiles = useCallback(async () => {
     const files = await api.openFileDialog()
     if (!files.length) {
@@ -161,58 +232,39 @@ export const useTabsController = (): UseTabsControllerResult => {
     }
 
     debugLog('openFiles received', files.map((file) => file.filePath))
-    const currentTabs = tabsRef.current
-    let updatedTabs = currentTabs.map((tab) => ({ ...tab, isActive: false }))
-    let activeId = activeTabIdRef.current
+    applyOpenedFiles(files)
+  }, [applyOpenedFiles])
 
-    files.forEach((file) => {
-      const existingIndex = updatedTabs.findIndex((tab) => isFileTab(tab) && tab.filePath === file.filePath)
-      if (existingIndex >= 0) {
-        const existingTab = updatedTabs[existingIndex] as FileTab
-        debugLog('openFiles refreshing existing tab', {
-          filePath: file.filePath,
-          tabId: existingTab.id
-        })
-        const refreshedTab: FileTab = {
-          ...existingTab,
-          content: file.content,
-          isDirty: false,
-          isActive: true
-        }
-        updatedTabs[existingIndex] = refreshedTab
-        activeId = refreshedTab.id
-      } else {
-        const id = generateTabId()
-        const title = window.electron.path.basename(file.filePath)
-        debugLog('openFiles creating new tab', {
-          filePath: file.filePath,
-          tabId: id,
-          title
-        })
-        const newTab: FileTab = {
-          kind: 'file',
-          id,
-          title,
-          filePath: file.filePath,
-          content: file.content,
-          isDirty: false,
-          isActive: true
-        }
-        updatedTabs = [...updatedTabs, newTab]
-        activeId = id
+  const openFilesFromPaths = useCallback(
+    async (filePaths: string[]) => {
+      if (!filePaths.length) {
+        debugLog('openFilesFromPaths called with no paths')
+        return
       }
-    })
 
-    const nextActiveTabId = activeId ?? updatedTabs.find((tab) => tab.isActive)?.id ?? null
-    debugLog('openFiles computed result', {
-      nextActiveTabId,
-      tabIds: updatedTabs.map((tab) => tab.id)
-    })
+      const files = await api.readFilesFromPaths(filePaths)
+      if (!files.length) {
+        debugLog('openFilesFromPaths resolved empty file list', filePaths)
+        return
+      }
 
-    tabsRef.current = updatedTabs
-    setTabs(updatedTabs)
-    updateActiveTab(nextActiveTabId)
-  }, [updateActiveTab])
+      debugLog('openFilesFromPaths received', files.map((file) => file.filePath))
+      applyOpenedFiles(files)
+    },
+    [applyOpenedFiles]
+  )
+
+  const openFilesFromContent = useCallback(
+    (files: OpenedFile[]) => {
+      if (!files.length) {
+        debugLog('openFilesFromContent called with empty payload')
+        return
+      }
+      debugLog('openFilesFromContent received', files.map((file) => file.name))
+      applyOpenedFiles(files)
+    },
+    [applyOpenedFiles]
+  )
 
   const switchTab = useCallback((tabId: string) => {
     debugLog('switchTab', tabId)
@@ -401,6 +453,8 @@ export const useTabsController = (): UseTabsControllerResult => {
     activeTabIdRef,
     createNewTab,
     openFiles,
+    openFilesFromPaths,
+    openFilesFromContent,
     switchTab,
     closeTab,
     closeActiveTab,
