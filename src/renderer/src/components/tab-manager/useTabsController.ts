@@ -9,16 +9,7 @@ import type {
   ActiveContext
 } from '@renderer/env'
 import { buildDefaultFilename, generateTabId } from './helpers'
-import {
-  WELCOME_TAB_ID,
-  isFileTab,
-  isSearchTab,
-  isWelcomeTab,
-  type FileTab,
-  type SearchTab,
-  type Tab,
-  type WelcomeTab
-} from './tab-types'
+import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, type Tab, type WelcomeTab } from './tab-types'
 import { buildSearchTabTitle } from './search-utils'
 
 const api: LogEditorApi = window.api
@@ -163,28 +154,42 @@ export const useTabsController = (): UseTabsControllerResult => {
         return
       }
 
+      const buildKey = (filePath: string | undefined, name: string): string => {
+        if (filePath && filePath.length > 0) {
+          return `path:${filePath}`
+        }
+        return `name:${name.trim().toLowerCase()}`
+      }
+
       const currentTabs = tabsRef.current
       let updatedTabs = currentTabs.map((tab) => ({ ...tab, isActive: false }))
       let activeId = activeTabIdRef.current
 
       files.forEach((file) => {
         const filePath = file.filePath
-        const fileName = file.name || (filePath ? window.electron.path.basename(filePath) : 'Untitled')
-        const existingIndex =
-          filePath != null && filePath.length > 0
-            ? updatedTabs.findIndex((tab) => isFileTab(tab) && tab.filePath === filePath)
-            : -1
+        const fileName =
+          file.name && file.name.length > 0
+            ? file.name
+            : filePath
+              ? window.electron.path.basename(filePath)
+              : 'Untitled'
+        const targetKey = buildKey(filePath, fileName)
+
+        const existingIndex = updatedTabs.findIndex(
+          (tab) => isFileTab(tab) && buildKey(tab.filePath, tab.title) === targetKey
+        )
 
         if (existingIndex >= 0) {
           const existingTab = updatedTabs[existingIndex] as FileTab
           debugLog('applyOpenedFiles refreshing existing tab', {
-            filePath,
+            key: targetKey,
             tabId: existingTab.id
           })
           const refreshedTab: FileTab = {
             ...existingTab,
             content: file.content,
             title: fileName,
+            filePath: filePath && filePath.length > 0 ? filePath : existingTab.filePath,
             isDirty: false,
             isActive: true
           }
@@ -193,7 +198,7 @@ export const useTabsController = (): UseTabsControllerResult => {
         } else {
           const id = generateTabId()
           debugLog('applyOpenedFiles creating new tab', {
-            filePath,
+            key: targetKey,
             tabId: id,
             title: fileName
           })
@@ -231,7 +236,10 @@ export const useTabsController = (): UseTabsControllerResult => {
       return
     }
 
-    debugLog('openFiles received', files.map((file) => file.filePath))
+    debugLog(
+      'openFiles received',
+      files.map((file) => file.filePath ?? file.name)
+    )
     applyOpenedFiles(files)
   }, [applyOpenedFiles])
 
@@ -248,7 +256,10 @@ export const useTabsController = (): UseTabsControllerResult => {
         return
       }
 
-      debugLog('openFilesFromPaths received', files.map((file) => file.filePath))
+      debugLog(
+        'openFilesFromPaths received',
+        files.map((file) => file.filePath ?? file.name)
+      )
       applyOpenedFiles(files)
     },
     [applyOpenedFiles]
@@ -285,9 +296,8 @@ export const useTabsController = (): UseTabsControllerResult => {
       removedTab = target
       const remaining = prev.filter((tab) => tab.id !== tabId)
       if (remaining.length === 0) {
-        const welcome = createWelcomeTab(true)
-        updateActiveTab(welcome.id)
-        return [welcome]
+        updateActiveTab(null)
+        return []
       }
 
       const closedIndex = prev.findIndex((tab) => tab.id === tabId)
@@ -332,8 +342,8 @@ export const useTabsController = (): UseTabsControllerResult => {
       return
     }
     const currentTab = tabsRef.current.find((tab) => tab.id === currentId)
-    if (!currentTab || isWelcomeTab(currentTab)) {
-      debugLog('closeActiveTab skipped: welcome or missing', currentId)
+    if (!currentTab) {
+      debugLog('closeActiveTab skipped: missing tab', currentId)
       return
     }
     closeTab(currentId)

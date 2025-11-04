@@ -74,9 +74,7 @@ const collectFilesFromDataTransfer = async (transfer: DataTransfer | null): Prom
     return []
   }
 
-  const results: OpenedFile[] = []
-
-  await Promise.all(
+  const results = await Promise.all(
     files.map(async (file) => {
       try {
         const content = await file.text()
@@ -84,21 +82,23 @@ const collectFilesFromDataTransfer = async (transfer: DataTransfer | null): Prom
         const normalizedPath =
           typeof potentialPath === 'string' && potentialPath.length > 0 ? potentialPath : undefined
         const name = file.name || (normalizedPath ? window.electron.path.basename(normalizedPath) : 'Dropped File')
-        results.push({
+        const opened: OpenedFile = {
           filePath: normalizedPath,
           name,
           content
-        })
+        }
+        return opened
       } catch (error) {
         if (import.meta.env.DEV) {
           // eslint-disable-next-line no-console
           console.error('[TabManager] failed to read dropped file', error)
         }
+        return null
       }
     })
   )
 
-  return results
+  return results.filter((entry): entry is OpenedFile => entry !== null)
 }
 
 function TabManager(): React.JSX.Element {
@@ -441,7 +441,7 @@ function TabManager(): React.JSX.Element {
       onDrop={handleDrop}
     >
       <nav
-        className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-2 py-2"
+        className="flex min-h-[44px] items-center gap-1 overflow-x-auto border-b border-slate-200 bg-slate-200"
         onDoubleClick={(event) => {
           const target = event.target as HTMLElement
           if (!target.closest('button')) {
@@ -454,25 +454,25 @@ function TabManager(): React.JSX.Element {
             key={tab.id}
             type="button"
             onClick={() => switchTab(tab.id)}
-            className={`group flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition ${
+            className={`group flex h-11 items-center gap-2 border px-4 text-sm font-medium transition ${
               tab.isActive
-                ? 'border-sky-500 bg-white text-sky-700 shadow'
+                ? 'border-sky-500 bg-white text-sky-700'
                 : 'border-transparent bg-slate-100 text-slate-500 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'
             }`}
           >
             <span className="max-w-[200px] truncate">{tab.title}</span>
             {isFileTab(tab) && tab.isDirty ? <span className="size-2 rounded-full bg-rose-500" /> : null}
-            <span
-              role="button"
+            <button
+              type="button"
               aria-label={`Close ${tab.title}`}
-              className="ml-1 text-xs text-slate-400 transition group-hover:text-sky-900"
+              className="ml-1 text-xs text-slate-400 transition hover:text-sky-900"
               onClick={(event) => {
                 event.stopPropagation()
                 closeTab(tab.id)
               }}
             >
               ×
-            </span>
+            </button>
           </button>
         ))}
       </nav>
