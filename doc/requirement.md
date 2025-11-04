@@ -142,7 +142,8 @@ src/
 ### 6.5 IPC 注册（`src/main/ipc.ts`）
 
 - 统一绑定 `ipcMain.handle/on`：
-  - `open-file-dialog`：使用 `dialog.showOpenDialog` 读取多个文件，返回 `{ filePath, content }[]`。
+  - `open-file-dialog`：使用 `dialog.showOpenDialog` 读取多个文件，返回 `OpenedFile[]`（包含绝对路径、文件名、文本内容）。
+  - `read-files-from-paths`：接收渲染层拖拽提供的路径数组，去重后逐一校验与读取磁盘，返回 `OpenedFile[]`。
   - `save-file-dialog`：根据 payload 保存文件；若无路径则弹出保存对话框；成功后调用 `searchService.updateTabContentByFilePath`。
   - `perform-search`：委托 `searchService.performSearch`，失败时记录错误。
   - `sync-tab-state` / `remove-tab-state`：同步标签缓存。
@@ -156,7 +157,8 @@ src/
 
 | Channel | 方向 | Payload | 说明 |
 | --- | --- | --- | --- |
-| `open-file-dialog` | renderer → main (invoke) | - | 弹出多选文件对话框，返回 `{ filePath, content }[]`。 |
+| `open-file-dialog` | renderer → main (invoke) | - | 弹出多选文件对话框，返回 `OpenedFile[]`（含 `filePath?`、`name`、`content`）。 |
+| `read-files-from-paths` | renderer → main (invoke) | `string[]` | 对拖拽落下的绝对路径去重并读取文本，返回 `OpenedFile[]`。 |
 | `save-file-dialog` | renderer → main (invoke) | `SaveFilePayload` | 若未提供 `filePath`，弹出保存对话框；写入磁盘后返回 `{ canceled, filePath? }`。 |
 | `perform-search` | renderer/search → main (invoke) | `SearchRequest` | 基于缓存标签或历史搜索执行计算，返回 `SearchResponsePayload`。 |
 | `sync-tab-state` | renderer → main | `SearchableTab` | 文本变更时同步标签快照。 |
@@ -185,14 +187,21 @@ src/
 - 工具函数：
   - `subscribe(channel, listener)`：统一监听器注册，返回解除订阅函数，确保 React `useEffect` 可清理。
   - `invoke<Result>(channel, payload?)`：包装 `ipcRenderer.invoke` 并回传泛型。
-- API 能力覆盖：文件对话框、保存对话框、搜索执行、标签同步与移除、搜索结果广播、菜单/搜索事件监听、主窗口聚焦、上下文同步等。
+- API 能力覆盖：文件对话框、路径批量读取、保存对话框、搜索执行、标签同步与移除、搜索结果广播、菜单/搜索事件监听、主窗口聚焦、上下文同步等。
 - 若禁用 `contextIsolation`，仍兜底将对象挂到 `window`，保证兼容性。
 
 `LogEditorApi` 类型（节选，与渲染端共享）：
 
 ```ts
+export type OpenedFile = {
+  filePath?: string
+  name: string
+  content: string
+}
+
 export interface LogEditorApi {
-  openFileDialog(): Promise<{ filePath: string; content: string }[]>
+  openFileDialog(): Promise<OpenedFile[]>
+  readFilesFromPaths(filePaths: string[]): Promise<OpenedFile[]>
   saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
   performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void
@@ -221,15 +230,16 @@ export interface LogEditorApi {
 ### 8.2 `useTabsController` hook（`tab-manager/useTabsController.ts`）
 
 - 管理标签状态、活动标签 ID、引用缓存：
-  - 初始状态为欢迎页；`tabsRef` 与 `activeTabIdRef` 用于跨闭包读取最新值。
+  - 初始状态为欢迎页；`tabsRef`、`activeTabIdRef` 与 `activationStackRef`（最近访问栈）用于跨闭包读取最新值，并维护“最近激活”顺序。
   - `createNewTab()` 在双击空白标签栏或菜单触发时创建新文件标签。
-  - `openFiles()` 调用 `api.openFileDialog()`，复用已打开标签或新建标签并激活。
+  - `openFiles()` 调用 `api.openFileDialog()`，并交由 `applyOpenedFiles()` 以“路径优先，其次为小写文件名”组合键去重：命中旧标签则刷新内容并推入激活栈，否则新建标签。
+  - `openFilesFromPaths()` / `openFilesFromContent()` 统一通过 `applyOpenedFiles()` 处理拖拽路径和浏览器 File API 读取的纯文本文件，保证菜单与拖拽逻辑一致。
   - `handleSave(forceSaveAs)` 依据当前激活文件调用 `api.saveFileDialog()`，更新标题/路径/脏标记。
-  - `closeTab()`/`closeActiveTab()` 处理标签关闭、欢迎页回退及缓存清理（文件调用 `api.removeTabState`，搜索调用 `api.disposeSearchResults`）。
+  - `closeTab()`/`closeActiveTab()` 会先更新激活栈，再根据栈顶恢复上一次访问的标签；当剩余标签为空时不再自动追加欢迎标签，而是保持列表为空并广播 `activeTabId = null`（欢迎内容仍由 UI 条件渲染）。
   - `handleSearchResults()` 创建/插入 `SearchTab`，支持按父搜索 ID 插入到父标签之后。
   - `handleSearchResultSelect(result, match)` 激活对应文件标签，供外层组件高亮定位。
 - 副作用：
-  - 每次 `tabs` 变化时调用 `api.syncTabState()` 同步内容缓存。
+  - 每次 `tabs` 变化时调用 `api.syncTabState()` 同步内容缓存，并裁剪激活栈中已被移除的标签 ID。
   - 活动标签变化时构建 `ActiveContext` 并调用 `api.updateActiveContext()`。
   - 组件卸载时自动释放所有搜索结果缓存。
 - 菜单与 IPC 监听：
@@ -246,8 +256,13 @@ export interface LogEditorApi {
     - 监听激活标签变化，随滚动重新定位高亮层。
     - 监听 `api.onSearchNavigate`（来自主进程转发的搜索窗口请求），切换标签并调用 `focusLine`。
     - 管理搜索结果容器的透明度（通过 `MutationObserver` 保持 `opacity:1`）。
+  - 拖拽打开文件：
+    - `collectDroppedFilePaths()` 从 `DataTransfer` 的 `files`、`text/uri-list` 与 `text/plain` 中提取绝对路径并去重；
+    - 若未获取到路径，`collectFilesFromDataTransfer()` 使用浏览器 File API 读取文本内容并包装为 `OpenedFile`；
+    - 组件根节点与编辑区 textarea 都绑定 `onDragOver`/`onDrop`，统一调用 `useTabsController.openFilesFromPaths` / `openFilesFromContent`。
   - 渲染逻辑：
-    - 标签栏按钮使用 Tailwind 样式，双击空白区域创建新标签。
+    - 标签栏使用最小高度 44px 的 `flex` 容器，背景为浅灰；标签按钮拥有可见边框，激活态填充白色并以天蓝色描边，非激活态为浅灰背景。
+    - 双击标签栏空白区域创建新标签；每个标签右侧以 button 形式提供关闭按钮。
     - 文件标签区域包含行号列（随着滚动调整 transform）与内容 textarea。
     - 搜索标签交由 `SearchResultsPanel` 渲染，欢迎标签使用居中文案。
 
@@ -263,6 +278,7 @@ export interface LogEditorApi {
 ### 8.5 欢迎页与编辑体验
 
 - 欢迎页内容提醒用户使用菜单创建/打开日志或调用搜索。
+- 欢迎标签可以像普通标签一样关闭；当 `tabs` 为空时，标签栏保持最小高度但不自动生成新标签，欢迎内容由 `activeTabId === null` 条件渲染。
 - 文本编辑区采用 `editor-scrollbar` 自定义滚动条（浅蓝色滑块），并按等宽字体渲染。
 - 行号与高亮 overlay 使用绝对定位结合 scroll 事件调整，保证高亮与内容同步。
 
@@ -334,9 +350,11 @@ export interface LogEditorApi {
    - `search.ts` 调用预加载 API 执行搜索、聚焦主窗口并展示状态。
 7. 确保 `src/renderer/src/env.d.ts` re-export 共享类型，为 React 组件提供类型提示。
 8. 验证功能流程：
-   - 新建、打开、保存、另存、关闭标签；
-   - 搜索窗口执行普通/正则/排除/嵌套搜索，结果可在主窗口新标签中展示；
-   - 搜索结果双击或菜单导航可定位到文本并显示高亮；
-   - 关闭搜索标签释放缓存，重新打开仍能保留已激活文件内容。
+  - 新建、打开、保存、另存、关闭标签；
+  - 重复打开同一路径或同名（无路径）文件时应复用现有标签，并在关闭后按照最近激活顺序切回；
+  - 搜索窗口执行普通/正则/排除/嵌套搜索，结果可在主窗口新标签中展示；
+  - 搜索结果双击或菜单导航可定位到文本并显示高亮；
+  - 关闭搜索标签释放缓存，重新打开仍能保留已激活文件内容。
+  - 从文件管理器拖拽日志到窗口任意处应成功打开：若提供文件路径则走 IPC 读取，否则回退浏览器 File API 获取内容。
 
 严格遵守以上条目即可完整复刻当前 LogEditor 项目。
