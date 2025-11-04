@@ -52,6 +52,7 @@ export const useTabsController = (): UseTabsControllerResult => {
 
   const tabsRef = useRef<Tab[]>([createWelcomeTab(true)])
   const activeTabIdRef = useRef<string | null>(WELCOME_TAB_ID)
+  const activationStackRef = useRef<string[]>([WELCOME_TAB_ID])
   const untitledCounterRef = useRef<number>(1)
 
   useEffect(() => {
@@ -66,6 +67,10 @@ export const useTabsController = (): UseTabsControllerResult => {
     debugLog('updateActiveTab', id)
     setActiveTabId(id)
     activeTabIdRef.current = id
+    if (id) {
+      activationStackRef.current = activationStackRef.current.filter((tabId) => tabId !== id)
+      activationStackRef.current.push(id)
+    }
   }, [])
 
   useEffect(() => {
@@ -91,6 +96,15 @@ export const useTabsController = (): UseTabsControllerResult => {
       })
     })
   }, [tabs])
+
+  useEffect(() => {
+    const existingIds = new Set(tabs.map((tab) => tab.id))
+    activationStackRef.current = activationStackRef.current.filter((tabId) => existingIds.has(tabId))
+    if (activeTabId && existingIds.has(activeTabId)) {
+      activationStackRef.current = activationStackRef.current.filter((tabId) => tabId !== activeTabId)
+      activationStackRef.current.push(activeTabId)
+    }
+  }, [activeTabId, tabs])
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [tabs, activeTabId])
 
@@ -290,33 +304,50 @@ export const useTabsController = (): UseTabsControllerResult => {
 
   const closeTab = useCallback((tabId: string) => {
     debugLog('closeTab', tabId)
-    let removedTab: Tab | undefined
-    setTabs((prev) => {
-      const target = prev.find((tab) => tab.id === tabId)
-      removedTab = target
-      const remaining = prev.filter((tab) => tab.id !== tabId)
-      if (remaining.length === 0) {
-        updateActiveTab(null)
-        return []
+    const currentTabs = tabsRef.current
+    const target = currentTabs.find((tab) => tab.id === tabId)
+    if (!target) {
+      debugLog('closeTab skipped: target not found', tabId)
+      return
+    }
+
+    const remaining = currentTabs.filter((tab) => tab.id !== tabId)
+
+    activationStackRef.current = activationStackRef.current.filter((id) => id !== tabId)
+    const remainingIds = new Set(remaining.map((tab) => tab.id))
+    activationStackRef.current = activationStackRef.current.filter((id) => remainingIds.has(id))
+
+    if (!remaining.length) {
+      activationStackRef.current = []
+      tabsRef.current = []
+      setTabs([])
+      updateActiveTab(null)
+    } else {
+      let nextActiveId =
+        activationStackRef.current.length > 0
+          ? activationStackRef.current[activationStackRef.current.length - 1]
+          : null
+
+      if (!nextActiveId || !remainingIds.has(nextActiveId)) {
+        nextActiveId = remaining[remaining.length - 1]?.id ?? null
       }
 
-      const closedIndex = prev.findIndex((tab) => tab.id === tabId)
-      const fallback = remaining[closedIndex - 1] ?? remaining[0] ?? null
-      const nextActiveId =
-        activeTabIdRef.current === tabId ? fallback?.id ?? null : activeTabIdRef.current
-      updateActiveTab(nextActiveId)
-      return remaining.map((tab) => ({
+      const nextTabs = remaining.map((tab) => ({
         ...tab,
         isActive: tab.id === nextActiveId
       }))
-    })
 
-    if (removedTab && isFileTab(removedTab)) {
-      debugLog('closeTab removing tab state', removedTab.id)
+      tabsRef.current = nextTabs
+      setTabs(nextTabs)
+      updateActiveTab(nextActiveId)
+    }
+
+    if (isFileTab(target)) {
+      debugLog('closeTab removing tab state', target.id)
       api.removeTabState(tabId)
-    } else if (removedTab && isSearchTab(removedTab)) {
-      debugLog('closeTab disposing search results', removedTab.id)
-      api.disposeSearchResults(removedTab.id)
+    } else if (isSearchTab(target)) {
+      debugLog('closeTab disposing search results', target.id)
+      api.disposeSearchResults(target.id)
     }
   }, [updateActiveTab])
 
