@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { createReadStream } from 'fs'
 import type {
   SearchRequest,
   SearchResponseItem,
@@ -21,6 +22,7 @@ type FindMatchOptions = {
   matcher: RegExp | null
   excludeQuery?: string
   excludeMatcher: RegExp | null
+  dedupeLines: boolean
 }
 
 type SearchServiceDeps = {
@@ -28,7 +30,7 @@ type SearchServiceDeps = {
 }
 
 export type SearchService = {
-  performSearch(request: SearchRequest): SearchResponsePayload
+  performSearch(request: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void
   removeTabState(tabId: string): void
   disposeSearchResults(searchId: string): void
@@ -76,7 +78,7 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
     return { matcher, excludeMatcher }
   }
 
-  const performSearch = (rawRequest: SearchRequest): SearchResponsePayload => {
+  const performSearch = async (rawRequest: SearchRequest): Promise<SearchResponsePayload> => {
     const request = normalizeRequest(rawRequest)
     const { matcher, excludeMatcher } = buildMatchers(request)
     const findOptions: FindMatchOptions = {
@@ -85,7 +87,8 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
       matchCase: request.matchCase,
       matcher,
       excludeQuery: request.excludeQuery,
-      excludeMatcher
+      excludeMatcher,
+      dedupeLines: request.dedupeLines ?? true
     }
 
     let results: SearchResponseItem[] = []
@@ -98,7 +101,12 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
       }
     } else {
       for (const tab of tabStore.values()) {
-        const matches = findMatches(tab.content, findOptions)
+        let matches: SearchMatch[] = []
+        if (tab.isTruncated && tab.filePath) {
+          matches = await findMatchesInFile(tab.filePath, findOptions)
+        } else {
+          matches = findMatches(tab.content, findOptions)
+        }
         if (matches.length) {
           results.push({
             tabId: tab.id,
@@ -117,7 +125,12 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
       results
     }
 
-    searchResultsStore.set(payload.searchId, payload)
+    searchResultsStore.set(payload.searchId, {
+      searchId: payload.searchId,
+      parentSearchId: payload.parentSearchId,
+      request: payload.request,
+      results: payload.results
+    })
     return payload
   }
 
@@ -139,7 +152,16 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
     }
     const existing = Array.from(tabStore.values()).find((tab) => tab.filePath === filePath)
     if (existing) {
-      tabStore.set(existing.id, { ...existing, content })
+      tabStore.set(existing.id, {
+        ...existing,
+        content,
+        size: content.length,
+        isTruncated: false,
+        loadedRange: {
+          start: 0,
+          end: content.length
+        }
+      })
     }
   }
 
@@ -155,69 +177,172 @@ export const createSearchService = (deps: SearchServiceDeps = {}): SearchService
   }
 }
 
-function findMatches(content: string, options: FindMatchOptions): SearchMatch[] {
-  const lines = content.split(/\r?\n/)
-  const matches: SearchMatch[] = []
-  const excludeNeedle =
-    options.excludeQuery && !options.isRegex
-      ? options.matchCase
-        ? options.excludeQuery
-        : options.excludeQuery.toLowerCase()
-      : undefined
+const LINE_BREAK_REGEX = /\r?\n/
+const STREAM_HIGH_WATER_MARK = 512 * 1024
+const MAX_STREAM_MATCHES = 5000
 
-  const shouldExcludeLine = (lineText: string): boolean => {
-    if (!options.excludeQuery) {
-      return false
-    }
-    if (options.isRegex && options.excludeMatcher) {
-      const tester = new RegExp(options.excludeMatcher.source, options.excludeMatcher.flags)
-      return tester.test(lineText)
-    }
-    const haystack = options.matchCase ? lineText : lineText.toLowerCase()
-    return excludeNeedle ? haystack.includes(excludeNeedle) : false
+const trimCarriageReturn = (value: string): string =>
+  value.endsWith('\r') ? value.slice(0, -1) : value
+
+const shouldExcludeLine = (lineText: string, options: FindMatchOptions): boolean => {
+  if (!options.excludeQuery) {
+    return false
   }
 
-  lines.forEach((lineText, index) => {
-    if (!lineText.length && !options.query.length) {
+  if (options.isRegex && options.excludeMatcher) {
+    const tester = new RegExp(options.excludeMatcher.source, options.excludeMatcher.flags)
+    return tester.test(lineText)
+  }
+
+  const haystack = options.matchCase ? lineText : lineText.toLowerCase()
+  const needle = options.matchCase ? options.excludeQuery : options.excludeQuery?.toLowerCase()
+  return typeof needle === 'string' ? haystack.includes(needle) : false
+}
+
+const collectMatchesFromLine = (
+  lineText: string,
+  lineNumber: number,
+  options: FindMatchOptions
+): SearchMatch[] => {
+  if (!options.query.length) {
+    return []
+  }
+
+  const matches: SearchMatch[] = []
+  if (options.isRegex && options.matcher) {
+    const localMatcher = new RegExp(options.matcher.source, options.matcher.flags)
+    let execMatch: RegExpExecArray | null
+    while ((execMatch = localMatcher.exec(lineText)) !== null) {
+      matches.push({
+        line: lineNumber,
+        column: execMatch.index + 1,
+        match: execMatch[0],
+        preview: lineText
+      })
+      if (options.dedupeLines) {
+        break
+      }
+      if (execMatch[0].length === 0) {
+        localMatcher.lastIndex += 1
+      }
+      if (!localMatcher.global) {
+        break
+      }
+    }
+    return matches
+  }
+
+  const haystack = options.matchCase ? lineText : lineText.toLowerCase()
+  const needle = options.matchCase ? options.query : options.query.toLowerCase()
+  if (!needle.length) {
+    return []
+  }
+
+  let fromIndex = 0
+  while (fromIndex <= haystack.length) {
+    const hit = haystack.indexOf(needle, fromIndex)
+    if (hit === -1) {
+      break
+    }
+    matches.push({
+      line: lineNumber,
+      column: hit + 1,
+      match: lineText.slice(hit, hit + needle.length),
+      preview: lineText
+    })
+    if (options.dedupeLines) {
+      break
+    }
+    fromIndex = hit + needle.length
+  }
+
+  return matches
+}
+
+function findMatches(content: string, options: FindMatchOptions): SearchMatch[] {
+  if (!options.query.length) {
+    return []
+  }
+
+  const lines = content.split(LINE_BREAK_REGEX)
+  const matches: SearchMatch[] = []
+
+  lines.forEach((rawLine, index) => {
+    const lineText = trimCarriageReturn(rawLine)
+    if (shouldExcludeLine(lineText, options)) {
       return
     }
-
-    if (shouldExcludeLine(lineText)) {
-      return
-    }
-
-    if (options.isRegex && options.matcher) {
-      const localMatcher = new RegExp(options.matcher.source, options.matcher.flags)
-      let execMatch: RegExpExecArray | null
-      while ((execMatch = localMatcher.exec(lineText)) !== null) {
-        matches.push({
-          line: index + 1,
-          column: execMatch.index + 1,
-          match: execMatch[0],
-          preview: lineText
-        })
-        if (execMatch[0].length === 0) {
-          localMatcher.lastIndex += 1
-        }
-        if (!localMatcher.global) break
-      }
-    } else {
-      const haystack = options.matchCase ? lineText : lineText.toLowerCase()
-      const needle = options.matchCase ? options.query : options.query.toLowerCase()
-      let fromIndex = 0
-      while (fromIndex <= haystack.length) {
-        const hit = haystack.indexOf(needle, fromIndex)
-        if (hit === -1) break
-        matches.push({
-          line: index + 1,
-          column: hit + 1,
-          match: lineText.slice(hit, hit + options.query.length),
-          preview: lineText
-        })
-        fromIndex = hit + (needle.length || 1)
-      }
+    const lineMatches = collectMatchesFromLine(lineText, index + 1, options)
+    if (lineMatches.length) {
+      matches.push(...lineMatches)
     }
   })
+
+  return matches
+}
+
+const findMatchesInFile = async (
+  filePath: string,
+  options: FindMatchOptions
+): Promise<SearchMatch[]> => {
+  if (!options.query.length) {
+    return []
+  }
+
+  const matches: SearchMatch[] = []
+  const stream = createReadStream(filePath, {
+    encoding: 'utf-8',
+    highWaterMark: STREAM_HIGH_WATER_MARK
+  })
+
+  let buffer = ''
+  let lineNumber = 0
+  let reachedLimit = false
+
+  try {
+    for await (const chunk of stream) {
+      buffer += chunk
+      const segments = buffer.split(LINE_BREAK_REGEX)
+      buffer = segments.pop() ?? ''
+
+      for (const rawLine of segments) {
+        lineNumber += 1
+        const lineText = trimCarriageReturn(rawLine)
+        if (shouldExcludeLine(lineText, options)) {
+          continue
+        }
+        const lineMatches = collectMatchesFromLine(lineText, lineNumber, options)
+        if (lineMatches.length) {
+          matches.push(...lineMatches)
+          if (matches.length >= MAX_STREAM_MATCHES) {
+            reachedLimit = true
+            break
+          }
+        }
+      }
+
+      if (reachedLimit) {
+        break
+      }
+    }
+  } finally {
+    if (!stream.destroyed) {
+      stream.destroy()
+    }
+  }
+
+  if (!reachedLimit && buffer.length) {
+    lineNumber += 1
+    const tailLine = trimCarriageReturn(buffer)
+    if (!shouldExcludeLine(tailLine, options)) {
+      const tailMatches = collectMatchesFromLine(tailLine, lineNumber, options)
+      matches.push(...tailMatches)
+    }
+  }
+
+  if (matches.length > MAX_STREAM_MATCHES) {
+    return matches.slice(0, MAX_STREAM_MATCHES)
+  }
 
   return matches
 }

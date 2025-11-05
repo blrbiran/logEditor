@@ -15,6 +15,20 @@ import {
 
 const api: LogEditorApi = window.api
 
+const DEFAULT_CHUNK_SIZE = 512 * 1024
+const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
+
+const formatBytes = (size: number): string => {
+  if (!Number.isFinite(size) || size <= 0) {
+    return '0 B'
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(size) / Math.log(1024)))
+  const value = size / Math.pow(1024, exponent)
+  const precision = value >= 100 || exponent === 0 ? 0 : 1
+  return `${value.toFixed(precision)} ${units[exponent]}`
+}
+
 const decodeUriList = (uriList: string | null | undefined): string[] => {
   if (!uriList) {
     return []
@@ -39,12 +53,6 @@ const collectDroppedFilePaths = (transfer: DataTransfer | null): string[] => {
   }
 
   const filePaths = new Set<string>()
-  Array.from(transfer.files ?? []).forEach((file) => {
-    const fileWithPath = file as File & { path?: string }
-    if (fileWithPath.path) {
-      filePaths.add(fileWithPath.path)
-    }
-  })
 
   decodeUriList(transfer.getData('text/uri-list')).forEach((path) => {
     if (path) {
@@ -64,12 +72,35 @@ const collectDroppedFilePaths = (transfer: DataTransfer | null): string[] => {
   return Array.from(filePaths)
 }
 
-const collectFilesFromDataTransfer = async (transfer: DataTransfer | null): Promise<OpenedFile[]> => {
+type ExtractedTransferPayload = {
+  filePaths: string[]
+  blobFiles: File[]
+}
+
+const extractTransferPayload = (transfer: DataTransfer | null): ExtractedTransferPayload => {
   if (!transfer) {
-    return []
+    return { filePaths: [], blobFiles: [] }
   }
 
-  const files = Array.from(transfer.files ?? [])
+  const filePaths = new Set<string>(collectDroppedFilePaths(transfer))
+  const blobFiles: File[] = []
+
+  Array.from(transfer.files ?? []).forEach((file) => {
+    const fileWithPath = file as File & { path?: string }
+    if (fileWithPath.path && fileWithPath.path.length > 0) {
+      filePaths.add(fileWithPath.path)
+    } else {
+      blobFiles.push(file)
+    }
+  })
+
+  return {
+    filePaths: Array.from(filePaths),
+    blobFiles
+  }
+}
+
+const readFilesFromBlobs = async (files: File[]): Promise<OpenedFile[]> => {
   if (!files.length) {
     return []
   }
@@ -77,15 +108,19 @@ const collectFilesFromDataTransfer = async (transfer: DataTransfer | null): Prom
   const results = await Promise.all(
     files.map(async (file) => {
       try {
-        const content = await file.text()
-        const potentialPath = (file as File & { path?: string }).path
-        const normalizedPath =
-          typeof potentialPath === 'string' && potentialPath.length > 0 ? potentialPath : undefined
-        const name = file.name || (normalizedPath ? window.electron.path.basename(normalizedPath) : 'Dropped File')
+        const totalSize = typeof file.size === 'number' ? file.size : 0
+        const shouldTruncate = totalSize > LARGE_FILE_THRESHOLD_BYTES
+        const chunk = shouldTruncate ? file.slice(0, DEFAULT_CHUNK_SIZE) : file
+        const content = await chunk.text()
+        const loadedBytes = shouldTruncate ? Math.min(totalSize, DEFAULT_CHUNK_SIZE) : totalSize
         const opened: OpenedFile = {
-          filePath: normalizedPath,
-          name,
-          content
+          filePath: undefined,
+          name: file.name || 'Dropped File',
+          content,
+          size: totalSize || content.length,
+          loadedBytes: loadedBytes || content.length,
+          isTruncated: shouldTruncate,
+          chunkSize: DEFAULT_CHUNK_SIZE
         }
         return opened
       } catch (error) {
@@ -122,7 +157,8 @@ function TabManager(): React.JSX.Element {
     switchTab,
     closeTab,
     updateTabContent,
-    handleSearchResultSelect
+    handleSearchResultSelect,
+    loadMoreContent
   } = useTabsController()
 
   const focusLine = useCallback(
@@ -260,33 +296,42 @@ function TabManager(): React.JSX.Element {
       event.preventDefault()
       event.stopPropagation()
       const transfer = event.nativeEvent?.dataTransfer ?? event.dataTransfer ?? null
-      const filePaths = collectDroppedFilePaths(transfer)
+      const { filePaths, blobFiles } = extractTransferPayload(transfer)
+
       if (filePaths.length) {
         if (import.meta.env.DEV) {
           // eslint-disable-next-line no-console
           console.log('[TabManager] drop received (paths)', filePaths)
         }
         void openFilesFromPaths(filePaths)
-        return
       }
 
-      void (async () => {
-        const fallbackFiles = await collectFilesFromDataTransfer(transfer)
-        if (fallbackFiles.length) {
+      if (blobFiles.length) {
+        void (async () => {
+          const fallbackFiles = await readFilesFromBlobs(blobFiles)
+          if (fallbackFiles.length) {
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.log('[TabManager] drop received (blob)', fallbackFiles.map((file) => file.name))
+            }
+            openFilesFromContent(fallbackFiles)
+            return
+          }
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
-            console.log('[TabManager] drop received (blob)', fallbackFiles.map((file) => file.name))
+            console.warn('[TabManager] drop ignored (blob read failed)', {
+              names: blobFiles.map((file) => file.name)
+            })
           }
-          openFilesFromContent(fallbackFiles)
-          return
-        }
-        if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
-          console.warn('[TabManager] drop ignored (no readable files)', {
-            types: transfer?.types
-          })
-        }
-      })()
+        })()
+      }
+
+      if (!filePaths.length && !blobFiles.length && import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.warn('[TabManager] drop ignored (no readable files)', {
+          types: transfer?.types
+        })
+      }
     },
     [openFilesFromContent, openFilesFromPaths]
   )
@@ -363,9 +408,37 @@ function TabManager(): React.JSX.Element {
   const handleSelectSearchMatch = useCallback(
     (result: SearchResultItem, match: SearchMatch) => {
       handleSearchResultSelect(result, match)
-      requestAnimationFrame(() => focusLine(result.tabId, match.line, match.column))
+      const ensureLoaded = async () => {
+        const MAX_ATTEMPTS = 12
+        let attempts = 0
+        while (attempts < MAX_ATTEMPTS) {
+          attempts += 1
+          const targetTab = tabsRef.current.find((tab) => tab.id === result.tabId)
+          if (!targetTab || !isFileTab(targetTab) || !targetTab.isTruncated) {
+            break
+          }
+          const linesLoaded = targetTab.content.split(/\r?\n/).length
+          if (match.line <= linesLoaded) {
+            break
+          }
+          try {
+            await loadMoreContent(targetTab.id)
+            await new Promise((resolve) => {
+              window.requestAnimationFrame(() => resolve(undefined))
+            })
+          } catch (error) {
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.error('[TabManager] failed to auto-load chunk', error)
+            }
+            break
+          }
+        }
+        requestAnimationFrame(() => focusLine(result.tabId, match.line, match.column))
+      }
+      void ensureLoaded()
     },
-    [focusLine, handleSearchResultSelect]
+    [focusLine, handleSearchResultSelect, loadMoreContent, tabsRef]
   )
 
   const renderSearchContent = useCallback(
@@ -380,8 +453,42 @@ function TabManager(): React.JSX.Element {
       return renderWelcomeContent()
     }
     if (isFileTab(tab)) {
+      const loadedBytes = Math.max(0, tab.loadedRange.end - tab.loadedRange.start)
+      const totalBytes = tab.size > 0 ? tab.size : loadedBytes
       return (
-        <div className="relative h-full">
+        <div className="relative flex h-full flex-col">
+          {tab.isReadOnly ? (
+            <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+              <div className="flex flex-col">
+                <span className="font-semibold">Large file preview (read-only)</span>
+                <span className="text-amber-700">
+                  Loaded {formatBytes(loadedBytes)} of {formatBytes(totalBytes)} · chunk size{' '}
+                  {formatBytes(tab.chunkSize)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {tab.isTruncated ? (
+                  <button
+                    type="button"
+                    className="rounded border border-amber-400 px-3 py-1 text-xs font-semibold text-amber-900 transition hover:border-amber-500 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={tab.isLoadingMore}
+                    onClick={() => {
+                      void loadMoreContent(tab.id).catch((error) => {
+                        if (import.meta.env.DEV) {
+                          // eslint-disable-next-line no-console
+                          console.error('[TabManager] load more failed', error)
+                        }
+                      })
+                    }}
+                  >
+                    {tab.isLoadingMore ? 'Loading…' : 'Load next chunk'}
+                  </button>
+                ) : (
+                  <span className="text-emerald-700">Fully loaded</span>
+                )}
+              </div>
+            </div>
+          ) : null}
           <div className="flex h-full">
             <div className="relative h-full shrink-0 overflow-hidden border-r border-slate-200 bg-slate-100/80">
               <div
@@ -411,7 +518,10 @@ function TabManager(): React.JSX.Element {
               onChange={(event) => updateTabContent(tab.id, event.target.value)}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
-              className="editor-scrollbar h-full w-full resize-none bg-transparent p-0 font-mono text-sm leading-6 text-slate-900 outline-none"
+              readOnly={tab.isReadOnly}
+              className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
+                tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
+              }`}
               spellCheck={false}
             />
           </div>

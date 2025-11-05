@@ -1,6 +1,7 @@
 import { ipcMain, dialog } from 'electron'
 import { promises as fs } from 'fs'
 import { basename } from 'path'
+import { TextDecoder } from 'util'
 import type { WindowManager } from './window-manager'
 import type { SearchService } from './search-service'
 import type {
@@ -9,13 +10,66 @@ import type {
   SaveFilePayload,
   SearchRequest,
   SearchResponsePayload,
-  SearchableTab
+  SearchableTab,
+  FileRangeRequest,
+  FileRangePayload
 } from '../common/ipc'
 
 type RegisterIpcDeps = {
   windowManager: WindowManager
   searchService: SearchService
   setActiveContext: (context: ActiveContext) => void
+}
+
+const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
+const DEFAULT_CHUNK_SIZE = 512 * 1024
+const textDecoder = new TextDecoder('utf-8')
+
+const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
+  try {
+    const stats = await fs.stat(filePath)
+    if (!stats.isFile()) {
+      return null
+    }
+
+    const totalSize = stats.size
+    const chunkSize = DEFAULT_CHUNK_SIZE
+    const shouldTruncate = totalSize > LARGE_FILE_THRESHOLD_BYTES
+    const readLength = shouldTruncate ? Math.min(chunkSize, Number(totalSize)) : Number(totalSize)
+
+    if (readLength === 0) {
+      return {
+        filePath,
+        name: basename(filePath),
+        content: '',
+        size: totalSize,
+        loadedBytes: 0,
+        isTruncated: false,
+        chunkSize
+      }
+    }
+
+    const handle = await fs.open(filePath, 'r')
+    try {
+      const buffer = Buffer.alloc(readLength)
+      const { bytesRead } = await handle.read(buffer, 0, readLength, 0)
+      const content = textDecoder.decode(buffer.subarray(0, bytesRead))
+      return {
+        filePath,
+        name: basename(filePath),
+        content,
+        size: totalSize,
+        loadedBytes: bytesRead,
+        isTruncated: shouldTruncate && bytesRead < totalSize,
+        chunkSize
+      }
+    } finally {
+      await handle.close()
+    }
+  } catch (error) {
+    console.error(`Failed to read file head: ${filePath}`, error)
+    return null
+  }
 }
 
 const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
@@ -28,25 +82,55 @@ const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
     }
     seen.add(filePath)
 
-    try {
-      const stats = await fs.stat(filePath)
-      if (!stats.isFile()) {
-        continue
-      }
-    } catch (error) {
-      console.error(`Failed to access file: ${filePath}`, error)
-      continue
-    }
-
-    try {
-      const content = await fs.readFile(filePath, 'utf-8')
-      results.push({ filePath, name: basename(filePath), content })
-    } catch (error) {
-      console.error(`Failed to read file: ${filePath}`, error)
+    const descriptor = await readFileHead(filePath)
+    if (descriptor) {
+      results.push(descriptor)
     }
   }
 
   return results
+}
+
+const readFileRange = async ({
+  filePath,
+  start,
+  length
+}: FileRangeRequest): Promise<FileRangePayload> => {
+  const safeStart = Number.isFinite(start) && start >= 0 ? Math.floor(start) : 0
+  const safeLength = Number.isFinite(length) && length > 0 ? Math.floor(length) : DEFAULT_CHUNK_SIZE
+
+  const handle = await fs.open(filePath, 'r')
+  try {
+    const stats = await handle.stat()
+    const totalSize = stats.size
+    if (safeStart >= totalSize) {
+      return {
+        filePath,
+        start: safeStart,
+        end: safeStart,
+        content: '',
+        totalSize,
+        hasMore: false
+      }
+    }
+
+    const endPosition = Math.min(totalSize, safeStart + safeLength)
+    const buffer = Buffer.alloc(endPosition - safeStart)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, safeStart)
+    const content = textDecoder.decode(buffer.subarray(0, bytesRead))
+
+    const nextEnd = safeStart + bytesRead
+    return {
+      filePath,
+      start: safeStart,
+      end: nextEnd,
+      content,
+      totalSize,
+      hasMore: nextEnd < totalSize
+    }
+  } finally {
+    await handle.close()
+  }
 }
 
 export const registerIpcHandlers = ({
@@ -85,6 +169,26 @@ export const registerIpcHandlers = ({
     return readFiles(filePaths)
   })
 
+  ipcMain.handle('read-file-range', async (_event, payload: FileRangeRequest) => {
+    if (!payload || typeof payload.filePath !== 'string') {
+      return {
+        filePath: '',
+        start: 0,
+        end: 0,
+        content: '',
+        totalSize: 0,
+        hasMore: false
+      }
+    }
+
+    try {
+      return await readFileRange(payload)
+    } catch (error) {
+      console.error('Failed to read file range', payload, error)
+      throw error
+    }
+  })
+
   ipcMain.handle('save-file-dialog', async (_event, payload: SaveFilePayload) => {
     const { filePath, content, defaultPath } = payload
     let targetPath = filePath
@@ -113,9 +217,9 @@ export const registerIpcHandlers = ({
     return { canceled: false, filePath: targetPath }
   })
 
-  ipcMain.handle('perform-search', (_event, request: SearchRequest): SearchResponsePayload => {
+  ipcMain.handle('perform-search', async (_event, request: SearchRequest): Promise<SearchResponsePayload> => {
     try {
-      return searchService.performSearch(request)
+      return await searchService.performSearch(request)
     } catch (error) {
       console.error('Search execution failed', error)
       throw error

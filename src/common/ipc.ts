@@ -46,6 +46,9 @@ export type SearchableTab = {
   title: string
   filePath?: string
   content: string
+  size: number
+  isTruncated: boolean
+  loadedRange: FileLoadedRange
 }
 
 export type SaveFilePayload = {
@@ -63,6 +66,30 @@ export type OpenedFile = {
   filePath?: string
   name: string
   content: string
+  size: number
+  loadedBytes: number
+  isTruncated: boolean
+  chunkSize: number
+}
+
+export type FileRangeRequest = {
+  filePath: string
+  start: number
+  length: number
+}
+
+export type FileRangePayload = {
+  filePath: string
+  start: number
+  end: number
+  content: string
+  totalSize: number
+  hasMore: boolean
+}
+
+export type FileLoadedRange = {
+  start: number
+  end: number
 }
 
 export type ActiveContext =
@@ -73,6 +100,7 @@ export type ActiveContext =
 export interface LogEditorApi {
   openFileDialog(): Promise<OpenedFile[]>
   readFilesFromPaths(filePaths: string[]): Promise<OpenedFile[]>
+  readFileRange(payload: FileRangeRequest): Promise<FileRangePayload>
   saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
   performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void

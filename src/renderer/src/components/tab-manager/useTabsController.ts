@@ -13,6 +13,7 @@ import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, t
 import { buildSearchTabTitle } from './search-utils'
 
 const api: LogEditorApi = window.api
+const DEFAULT_CHUNK_SIZE = 512 * 1024
 
 const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
   kind: 'welcome',
@@ -37,6 +38,7 @@ type UseTabsControllerResult = {
   updateTabContent(tabId: string, content: string): void
   handleSave(forceSaveAs: boolean): Promise<void>
   handleSearchResultSelect(result: SearchResultItem, match: SearchMatch): void
+  loadMoreContent(tabId: string): Promise<void>
 }
 
 const debugLog = (...args: unknown[]): void => {
@@ -92,7 +94,10 @@ export const useTabsController = (): UseTabsControllerResult => {
         id: tab.id,
         title: tab.title,
         filePath: tab.filePath,
-        content: tab.content
+        content: tab.content,
+        size: tab.size,
+        isTruncated: tab.isTruncated,
+        loadedRange: tab.loadedRange
       })
     })
   }, [tabs])
@@ -147,6 +152,12 @@ export const useTabsController = (): UseTabsControllerResult => {
         id,
         title,
         content: '',
+        size: 0,
+        loadedRange: { start: 0, end: 0 },
+        chunkSize: DEFAULT_CHUNK_SIZE,
+        isTruncated: false,
+        isReadOnly: false,
+        isLoadingMore: false,
         filePath: undefined,
         isDirty: false,
         isActive: true
@@ -199,11 +210,22 @@ export const useTabsController = (): UseTabsControllerResult => {
             key: targetKey,
             tabId: existingTab.id
           })
+          const chunkSize = file.chunkSize > 0 ? file.chunkSize : existingTab.chunkSize
+          const loadedBytes =
+            typeof file.loadedBytes === 'number' && file.loadedBytes >= 0
+              ? file.loadedBytes
+              : file.content.length
           const refreshedTab: FileTab = {
             ...existingTab,
             content: file.content,
             title: fileName,
             filePath: filePath && filePath.length > 0 ? filePath : existingTab.filePath,
+            size: file.size ?? loadedBytes,
+            loadedRange: { start: 0, end: loadedBytes },
+            chunkSize,
+            isTruncated: Boolean(file.isTruncated && filePath),
+            isReadOnly: Boolean(file.isTruncated && filePath),
+            isLoadingMore: false,
             isDirty: false,
             isActive: true
           }
@@ -216,12 +238,23 @@ export const useTabsController = (): UseTabsControllerResult => {
             tabId: id,
             title: fileName
           })
+          const loadedBytes =
+            typeof file.loadedBytes === 'number' && file.loadedBytes >= 0
+              ? file.loadedBytes
+              : file.content.length
+          const chunkSize = file.chunkSize > 0 ? file.chunkSize : DEFAULT_CHUNK_SIZE
           const newTab: FileTab = {
             kind: 'file',
             id,
             title: fileName,
             filePath: filePath && filePath.length > 0 ? filePath : undefined,
             content: file.content,
+            size: file.size ?? loadedBytes,
+            loadedRange: { start: 0, end: loadedBytes },
+            chunkSize,
+            isTruncated: Boolean(file.isTruncated && filePath),
+            isReadOnly: Boolean(file.isTruncated && filePath),
+            isLoadingMore: false,
             isDirty: false,
             isActive: true
           }
@@ -354,15 +387,23 @@ export const useTabsController = (): UseTabsControllerResult => {
   const updateTabContent = useCallback((tabId: string, content: string) => {
     debugLog('updateTabContent', { tabId, length: content.length })
     setTabs((prev) =>
-      prev.map((tab) =>
-        tab.id === tabId && isFileTab(tab)
-          ? {
-              ...tab,
-              content,
-              isDirty: true
-            }
-          : tab
-      )
+      prev.map((tab) => {
+        if (tab.id !== tabId || !isFileTab(tab)) {
+          return tab
+        }
+        if (tab.isReadOnly) {
+          debugLog('updateTabContent skipped (read-only tab)', tabId)
+          return tab
+        }
+        return {
+          ...tab,
+          content,
+          size: content.length,
+          loadedRange: { start: 0, end: content.length },
+          isTruncated: false,
+          isDirty: true
+        }
+      })
     )
   }, [])
 
@@ -413,6 +454,10 @@ export const useTabsController = (): UseTabsControllerResult => {
                 ...tab,
                 filePath: result.filePath,
                 title: newTitle,
+                size: tab.content.length,
+                loadedRange: { start: 0, end: tab.content.length },
+                isTruncated: false,
+                isReadOnly: false,
                 isDirty: false
               }
             : tab
@@ -471,6 +516,86 @@ export const useTabsController = (): UseTabsControllerResult => {
     updateActiveTab(result.tabId)
   }, [updateActiveTab])
 
+  const loadMoreContent = useCallback(
+    async (tabId: string) => {
+      const target = tabsRef.current.find(
+        (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
+      )
+      if (!target) {
+        debugLog('loadMoreContent skipped: missing tab', tabId)
+        return
+      }
+      if (!target.filePath) {
+        debugLog('loadMoreContent skipped: tab has no file path', tabId)
+        return
+      }
+      if (!target.isTruncated) {
+        debugLog('loadMoreContent skipped: tab fully loaded', tabId)
+        return
+      }
+      if (target.isLoadingMore) {
+        debugLog('loadMoreContent skipped: already loading', tabId)
+        return
+      }
+
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === tabId && isFileTab(tab)
+            ? {
+                ...tab,
+                isLoadingMore: true
+              }
+            : tab
+        )
+      )
+
+      try {
+        const range = await api.readFileRange({
+          filePath: target.filePath,
+          start: target.loadedRange.end,
+          length: target.chunkSize > 0 ? target.chunkSize : DEFAULT_CHUNK_SIZE
+        })
+        debugLog('loadMoreContent resolved', {
+          tabId,
+          start: range.start,
+          end: range.end,
+          hasMore: range.hasMore
+        })
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== tabId || !isFileTab(tab)) {
+              return tab
+            }
+            const appendedContent = tab.content + range.content
+            return {
+              ...tab,
+              content: appendedContent,
+              size: range.totalSize,
+              loadedRange: { start: 0, end: range.end },
+              isTruncated: range.hasMore,
+              isReadOnly: range.hasMore ? tab.isReadOnly : false,
+              isLoadingMore: false
+            }
+          })
+        )
+      } catch (error) {
+        debugLog('loadMoreContent failed', { tabId, error })
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === tabId && isFileTab(tab)
+              ? {
+                  ...tab,
+                  isLoadingMore: false
+                }
+              : tab
+          )
+        )
+        throw error
+      }
+    },
+    [api]
+  )
+
   useEffect(() => {
     const disposers = [
       api.onMenuNewFile(() => createNewTab()),
@@ -501,6 +626,7 @@ export const useTabsController = (): UseTabsControllerResult => {
     closeActiveTab,
     updateTabContent,
     handleSave,
-    handleSearchResultSelect
+    handleSearchResultSelect,
+    loadMoreContent
   }
 }

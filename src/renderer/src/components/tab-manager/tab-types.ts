@@ -1,4 +1,4 @@
-import type { SearchRequest, SearchResultItem } from '@renderer/env'
+import type { FileLoadedRange, SearchRequest, SearchResultItem } from '@renderer/env'
 
 export const WELCOME_TAB_ID = 'welcome-tab'
 
@@ -8,6 +8,12 @@ export type FileTab = {
   title: string
   filePath?: string
   content: string
+  size: number
+  loadedRange: FileLoadedRange
+  chunkSize: number
+  isTruncated: boolean
+  isReadOnly: boolean
+  isLoadingMore: boolean
   isDirty: boolean
   isActive: boolean
 }
