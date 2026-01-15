@@ -1,5 +1,5 @@
 import { ipcMain, dialog } from 'electron'
-import { promises as fs } from 'fs'
+import { promises as fs, createReadStream } from 'fs'
 import { basename } from 'path'
 import { TextDecoder } from 'util'
 import type { WindowManager } from './window-manager'
@@ -24,6 +24,42 @@ type RegisterIpcDeps = {
 const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
 const DEFAULT_CHUNK_SIZE = 512 * 1024
 const textDecoder = new TextDecoder('utf-8')
+
+const countLinesInText = (value: string): number => {
+  if (!value.length) {
+    return 1
+  }
+  let count = 1
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 10) {
+      count += 1
+    }
+  }
+  return count
+}
+
+const countLinesInFile = async (filePath: string): Promise<number> => {
+  return await new Promise((resolve, reject) => {
+    let count = 0
+    const stream = createReadStream(filePath, {
+      encoding: 'utf-8',
+      highWaterMark: 256 * 1024
+    })
+    stream.on('data', (chunk: string) => {
+      for (let index = 0; index < chunk.length; index += 1) {
+        if (chunk.charCodeAt(index) === 10) {
+          count += 1
+        }
+      }
+    })
+    stream.on('end', () => {
+      resolve(count + 1)
+    })
+    stream.on('error', (error) => {
+      reject(error)
+    })
+  })
+}
 
 const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
   try {
@@ -54,6 +90,15 @@ const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
       const buffer = Buffer.alloc(readLength)
       const { bytesRead } = await handle.read(buffer, 0, readLength, 0)
       const content = textDecoder.decode(buffer.subarray(0, bytesRead))
+      const loadedLineCount = countLinesInText(content)
+      let lineCount = loadedLineCount
+      if (shouldTruncate) {
+        try {
+          lineCount = await countLinesInFile(filePath)
+        } catch (error) {
+          console.warn(`Failed to count lines for ${filePath}`, error)
+        }
+      }
       return {
         filePath,
         name: basename(filePath),
@@ -61,7 +106,9 @@ const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
         size: totalSize,
         loadedBytes: bytesRead,
         isTruncated: shouldTruncate && bytesRead < totalSize,
-        chunkSize
+        chunkSize,
+        lineCount,
+        loadedLineCount
       }
     } finally {
       await handle.close()

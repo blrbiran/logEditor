@@ -11,6 +11,7 @@ import type {
 import { buildDefaultFilename, generateTabId } from './helpers'
 import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, type Tab, type WelcomeTab } from './tab-types'
 import { buildSearchTabTitle } from './search-utils'
+import { countLines, countLinesForAppend } from '@renderer/utils/text-metrics'
 
 const api: LogEditorApi = window.api
 const DEFAULT_CHUNK_SIZE = 512 * 1024
@@ -97,7 +98,9 @@ export const useTabsController = (): UseTabsControllerResult => {
         content: tab.content,
         size: tab.size,
         isTruncated: tab.isTruncated,
-        loadedRange: tab.loadedRange
+        loadedRange: tab.loadedRange,
+        lineCount: tab.lineCount,
+        loadedLineCount: tab.loadedLineCount
       })
     })
   }, [tabs])
@@ -160,7 +163,9 @@ export const useTabsController = (): UseTabsControllerResult => {
         isLoadingMore: false,
         filePath: undefined,
         isDirty: false,
-        isActive: true
+        isActive: true,
+        lineCount: 1,
+        loadedLineCount: 1
       }
       const nextTabs = [...reset, newTab]
       debugLog('createNewTab:setTabs', {
@@ -215,6 +220,8 @@ export const useTabsController = (): UseTabsControllerResult => {
             typeof file.loadedBytes === 'number' && file.loadedBytes >= 0
               ? file.loadedBytes
               : file.content.length
+          const totalLineCount = file.lineCount ?? countLines(file.content)
+          const loadedLineCount = file.loadedLineCount ?? countLines(file.content)
           const refreshedTab: FileTab = {
             ...existingTab,
             content: file.content,
@@ -227,7 +234,9 @@ export const useTabsController = (): UseTabsControllerResult => {
             isReadOnly: Boolean(file.isTruncated && filePath),
             isLoadingMore: false,
             isDirty: false,
-            isActive: true
+            isActive: true,
+            lineCount: totalLineCount,
+            loadedLineCount
           }
           updatedTabs[existingIndex] = refreshedTab
           activeId = refreshedTab.id
@@ -256,7 +265,9 @@ export const useTabsController = (): UseTabsControllerResult => {
             isReadOnly: Boolean(file.isTruncated && filePath),
             isLoadingMore: false,
             isDirty: false,
-            isActive: true
+            isActive: true,
+            lineCount: file.lineCount ?? countLines(file.content),
+            loadedLineCount: file.loadedLineCount ?? countLines(file.content)
           }
           updatedTabs = [...updatedTabs, newTab]
           activeId = id
@@ -395,13 +406,16 @@ export const useTabsController = (): UseTabsControllerResult => {
           debugLog('updateTabContent skipped (read-only tab)', tabId)
           return tab
         }
+        const totalLineCount = countLines(content)
         return {
           ...tab,
           content,
           size: content.length,
           loadedRange: { start: 0, end: content.length },
           isTruncated: false,
-          isDirty: true
+          isDirty: true,
+          lineCount: totalLineCount,
+          loadedLineCount: totalLineCount
         }
       })
     )
@@ -567,6 +581,8 @@ export const useTabsController = (): UseTabsControllerResult => {
               return tab
             }
             const appendedContent = tab.content + range.content
+            const appendedLines = countLinesForAppend(range.content, tab.content.endsWith('\n'))
+            const nextLoadedLines = tab.loadedLineCount + appendedLines
             return {
               ...tab,
               content: appendedContent,
@@ -574,7 +590,9 @@ export const useTabsController = (): UseTabsControllerResult => {
               loadedRange: { start: 0, end: range.end },
               isTruncated: range.hasMore,
               isReadOnly: range.hasMore ? tab.isReadOnly : false,
-              isLoadingMore: false
+              isLoadingMore: false,
+              loadedLineCount: nextLoadedLines,
+              lineCount: tab.lineCount ?? nextLoadedLines
             }
           })
         )

@@ -16,6 +16,8 @@ export type FileTab = {
   isLoadingMore: boolean
   isDirty: boolean
   isActive: boolean
+  lineCount: number
+  loadedLineCount: number
 }
 
 export type SearchTab = {

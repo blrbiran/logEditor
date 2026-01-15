@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { LogEditorApi, OpenedFile, SearchMatch, SearchResultItem } from '@renderer/env'
 import { SearchResultsPanel } from './tab-manager/SearchResultsPanel'
@@ -9,6 +9,7 @@ import {
   isFileTab,
   isSearchTab,
   isWelcomeTab,
+  type FileTab,
   type SearchTab,
   type Tab
 } from './tab-manager/tab-types'
@@ -17,6 +18,7 @@ const api: LogEditorApi = window.api
 
 const DEFAULT_CHUNK_SIZE = 512 * 1024
 const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
+const MAX_RENDERED_LINE_NUMBERS = 400
 
 const formatBytes = (size: number): string => {
   if (!Number.isFinite(size) || size <= 0) {
@@ -137,13 +139,63 @@ const readFilesFromBlobs = async (files: File[]): Promise<OpenedFile[]> => {
 }
 
 function TabManager(): React.JSX.Element {
+  type LineViewportState = {
+    firstLine: number
+    offset: number
+    visibleLines: number
+    lineHeight: number
+    paddingTop: number
+  }
+
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  const lineNumberRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const lineViewportRef = useRef<Record<string, LineViewportState>>({})
+  const lineViewportAnimationRef = useRef<number | null>(null)
+  const [, forceLineViewportRender] = useState(0)
+  const autoScrollIntentRef = useRef<Record<string, boolean>>({})
+  const defaultLineViewport: LineViewportState = {
+    firstLine: 1,
+    offset: 0,
+    visibleLines: MAX_RENDERED_LINE_NUMBERS,
+    lineHeight: 24,
+    paddingTop: 0
+  }
   const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
   const highlightTimeoutRef = useRef<number | null>(null)
   const searchContainerRef = useRef<HTMLDivElement | null>(null)
   const searchObserverRef = useRef<MutationObserver | null>(null)
+  const scheduleLineViewportUpdate = useCallback(
+    (tabId: string, textarea: HTMLTextAreaElement | null) => {
+      if (!textarea) {
+        return
+      }
+      if (lineViewportAnimationRef.current) {
+        cancelAnimationFrame(lineViewportAnimationRef.current)
+      }
+      lineViewportAnimationRef.current = window.requestAnimationFrame(() => {
+        const styles = getComputedStyle(textarea)
+        const lineHeight = parseFloat(styles.lineHeight || '20') || 20
+        const paddingTop = parseFloat(styles.paddingTop || '0') || 0
+        const scrollTop = textarea.scrollTop
+        const firstLine = Math.max(1, Math.floor(scrollTop / lineHeight) + 1)
+        const offset = scrollTop - (firstLine - 1) * lineHeight
+        const visibleLines = Math.max(
+          1,
+          Math.ceil(textarea.clientHeight / lineHeight) + 4
+        )
+        lineViewportRef.current[tabId] = {
+          firstLine,
+          offset,
+          visibleLines,
+          lineHeight,
+          paddingTop
+        }
+        forceLineViewportRender((value) => value + 1)
+        lineViewportAnimationRef.current = null
+      })
+    },
+    []
+  )
 
   const {
     tabs,
@@ -189,10 +241,7 @@ function TabManager(): React.JSX.Element {
       const desiredScrollTop = Math.max(0, paddingTop + (targetLine - 1) * lineHeight - visibleArea / 2)
 
       textarea.scrollTop = desiredScrollTop
-      const lineNumberEl = lineNumberRefs.current[tabId] ?? null
-      if (lineNumberEl) {
-        lineNumberEl.style.transform = `translateY(-${textarea.scrollTop}px)`
-      }
+      scheduleLineViewportUpdate(tabId, textarea)
 
       const paintHighlight = (): void => {
         const top = paddingTop + (targetLine - 1) * lineHeight - textarea.scrollTop
@@ -214,7 +263,7 @@ function TabManager(): React.JSX.Element {
         highlightInfoRef.current = null
       }, 2000)
     },
-    []
+    [scheduleLineViewportUpdate]
   )
 
   useEffect(() => {
@@ -234,10 +283,7 @@ function TabManager(): React.JSX.Element {
     overlay.style.right = '0px'
 
     const updateOverlayPosition = (): void => {
-      const lineNumberEl = lineNumberRefs.current[activeTabRecord.id] ?? null
-      if (lineNumberEl) {
-        lineNumberEl.style.transform = `translateY(-${textarea.scrollTop}px)`
-      }
+      scheduleLineViewportUpdate(activeTabRecord.id, textarea)
       const highlight = highlightInfoRef.current
       if (!highlight || highlight.tabId !== activeTabIdRef.current) {
         overlay.style.opacity = '0'
@@ -257,7 +303,17 @@ function TabManager(): React.JSX.Element {
     return () => {
       textarea.removeEventListener('scroll', updateOverlayPosition)
     }
-  }, [activeTabId, activeTabIdRef, tabsRef])
+  }, [activeTabId, activeTabIdRef, tabsRef, scheduleLineViewportUpdate])
+
+  useEffect(() => {
+    if (!activeTab || !isFileTab(activeTab)) {
+      return
+    }
+    const textarea = editorRefs.current[activeTab.id]
+    if (textarea) {
+      scheduleLineViewportUpdate(activeTab.id, textarea)
+    }
+  }, [activeTab, scheduleLineViewportUpdate])
 
   useEffect(() => {
     return () => {
@@ -265,6 +321,9 @@ function TabManager(): React.JSX.Element {
         window.clearTimeout(highlightTimeoutRef.current)
       }
       searchObserverRef.current?.disconnect()
+      if (lineViewportAnimationRef.current) {
+        cancelAnimationFrame(lineViewportAnimationRef.current)
+      }
     }
   }, [])
 
@@ -282,6 +341,26 @@ function TabManager(): React.JSX.Element {
       disposer()
     }
   }, [focusLine, switchTab, tabsRef])
+
+  useEffect(() => {
+    tabs.forEach((tab) => {
+      if (!isFileTab(tab)) {
+        return
+      }
+      if (!autoScrollIntentRef.current[tab.id]) {
+        return
+      }
+      if (tab.isLoadingMore) {
+        return
+      }
+      const textarea = editorRefs.current[tab.id]
+      if (textarea) {
+        textarea.scrollTop = textarea.scrollHeight - textarea.clientHeight
+        scheduleLineViewportUpdate(tab.id, textarea)
+      }
+      autoScrollIntentRef.current[tab.id] = false
+    })
+  }, [scheduleLineViewportUpdate, tabs])
 
   const handleDragOver = useCallback((event: ReactDragEvent) => {
     event.preventDefault()
@@ -336,12 +415,34 @@ function TabManager(): React.JSX.Element {
     [openFilesFromContent, openFilesFromPaths]
   )
 
-  const activeFileLineNumbers = useMemo(() => {
-    if (!activeTab || !isFileTab(activeTab)) {
-      return []
-    }
-    return activeTab.content.split(/\r?\n/).map((_, index) => index + 1)
-  }, [activeTab])
+  const handleFileScroll = useCallback(
+    (tab: FileTab, textarea: HTMLTextAreaElement) => {
+      scheduleLineViewportUpdate(tab.id, textarea)
+      if (!tab.isTruncated || tab.isLoadingMore) {
+        return
+      }
+      const totalLines = Math.max(tab.lineCount || tab.loadedLineCount || 1, 1)
+      const loadedRatio = Math.min(1, tab.loadedLineCount / totalLines)
+      const scrollable = textarea.scrollHeight - textarea.clientHeight
+      if (scrollable <= 0) {
+        return
+      }
+      const scrollTop = textarea.scrollTop
+      const scrollRatio = scrollTop / scrollable
+      const targetLine = Math.max(1, Math.floor(scrollRatio * totalLines))
+      const targetRatio = targetLine / totalLines
+      if (targetRatio >= loadedRatio - 0.02) {
+        autoScrollIntentRef.current[tab.id] = scrollRatio > 0.9
+        void loadMoreContent(tab.id).catch((error) => {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.error('[TabManager] auto load failed', error)
+          }
+        })
+      }
+    },
+    [loadMoreContent, scheduleLineViewportUpdate]
+  )
 
   useEffect(() => {
     if (activeTab && isSearchTab(activeTab)) {
@@ -409,16 +510,15 @@ function TabManager(): React.JSX.Element {
     (result: SearchResultItem, match: SearchMatch) => {
       handleSearchResultSelect(result, match)
       const ensureLoaded = async () => {
-        const MAX_ATTEMPTS = 12
+        const MAX_ITERATIONS = 400
         let attempts = 0
-        while (attempts < MAX_ATTEMPTS) {
+        while (attempts < MAX_ITERATIONS) {
           attempts += 1
           const targetTab = tabsRef.current.find((tab) => tab.id === result.tabId)
           if (!targetTab || !isFileTab(targetTab) || !targetTab.isTruncated) {
             break
           }
-          const linesLoaded = targetTab.content.split(/\r?\n/).length
-          if (match.line <= linesLoaded) {
+          if (match.line <= targetTab.loadedLineCount) {
             break
           }
           try {
@@ -455,6 +555,15 @@ function TabManager(): React.JSX.Element {
     if (isFileTab(tab)) {
       const loadedBytes = Math.max(0, tab.loadedRange.end - tab.loadedRange.start)
       const totalBytes = tab.size > 0 ? tab.size : loadedBytes
+      const viewport = lineViewportRef.current[tab.id] ?? defaultLineViewport
+      const totalLines = Math.max(tab.loadedLineCount, 1)
+      const safeFirstLine = Math.min(viewport.firstLine, totalLines)
+      const remaining = Math.max(1, totalLines - safeFirstLine + 1)
+      const lineRenderCount = Math.max(
+        1,
+        Math.min(viewport.visibleLines, remaining, MAX_RENDERED_LINE_NUMBERS)
+      )
+      const lineNumbers = Array.from({ length: lineRenderCount }, (_, index) => safeFirstLine + index)
       return (
         <div className="relative flex h-full flex-col">
           {tab.isReadOnly ? (
@@ -462,7 +571,8 @@ function TabManager(): React.JSX.Element {
               <div className="flex flex-col">
                 <span className="font-semibold">Large file preview (read-only)</span>
                 <span className="text-amber-700">
-                  Loaded {formatBytes(loadedBytes)} of {formatBytes(totalBytes)} · chunk size{' '}
+                  Loaded {formatBytes(loadedBytes)} of {formatBytes(totalBytes)} · lines{' '}
+                  {tab.loadedLineCount.toLocaleString()} / {tab.lineCount?.toLocaleString() ?? '—'} · chunk size{' '}
                   {formatBytes(tab.chunkSize)}
                 </span>
               </div>
@@ -492,19 +602,21 @@ function TabManager(): React.JSX.Element {
           <div className="flex h-full">
             <div className="relative h-full shrink-0 overflow-hidden border-r border-slate-200 bg-slate-100/80">
               <div
-                ref={(el) => {
-                  lineNumberRefs.current[tab.id] = el
-                  if (el) {
-                    const textarea = editorRefs.current[tab.id]
-                    if (textarea) {
-                      el.style.transform = `translateY(-${textarea.scrollTop}px)`
-                    }
-                  }
+                className="w-14 px-3 py-0 text-right font-mono text-xs text-slate-400 will-change-transform"
+                style={{
+                  transform: `translateY(-${viewport.offset}px)`,
+                  paddingTop: `${viewport.paddingTop}px`
                 }}
-                className="w-14 px-3 py-0 text-right font-mono text-xs leading-6 text-slate-400 will-change-transform"
               >
-                {activeFileLineNumbers.map((lineNumber) => (
-                  <span key={`${tab.id}-line-${lineNumber}`} className="block leading-6">
+                {lineNumbers.map((lineNumber) => (
+                  <span
+                    key={`${tab.id}-line-${lineNumber}`}
+                    className="block"
+                    style={{
+                      height: `${viewport.lineHeight}px`,
+                      lineHeight: `${viewport.lineHeight}px`
+                    }}
+                  >
                     {lineNumber}
                   </span>
                 ))}
@@ -513,11 +625,13 @@ function TabManager(): React.JSX.Element {
             <textarea
               ref={(el) => {
                 editorRefs.current[tab.id] = el
+                scheduleLineViewportUpdate(tab.id, el)
               }}
               value={tab.content}
               onChange={(event) => updateTabContent(tab.id, event.target.value)}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
+              onScroll={(event) => handleFileScroll(tab, event.currentTarget)}
               readOnly={tab.isReadOnly}
               className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
                 tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'

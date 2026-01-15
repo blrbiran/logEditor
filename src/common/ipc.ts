@@ -49,6 +49,8 @@ export type SearchableTab = {
   size: number
   isTruncated: boolean
   loadedRange: FileLoadedRange
+  lineCount?: number
+  loadedLineCount?: number
 }
 
 export type SaveFilePayload = {
@@ -70,6 +72,8 @@ export type OpenedFile = {
   loadedBytes: number
   isTruncated: boolean
   chunkSize: number
+  lineCount?: number
+  loadedLineCount?: number
 }
 
 export type FileRangeRequest = {
