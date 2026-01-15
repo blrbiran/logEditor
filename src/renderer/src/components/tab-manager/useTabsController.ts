@@ -91,11 +91,12 @@ export const useTabsController = (): UseTabsControllerResult => {
       }))
     )
     tabs.filter(isFileTab).forEach((tab) => {
+      const serializedContent = tab.isTruncated ? '' : tab.content
       api.syncTabState({
         id: tab.id,
         title: tab.title,
         filePath: tab.filePath,
-        content: tab.content,
+        content: serializedContent,
         size: tab.size,
         isTruncated: tab.isTruncated,
         loadedRange: tab.loadedRange,

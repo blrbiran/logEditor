@@ -147,6 +147,32 @@ function TabManager(): React.JSX.Element {
     paddingTop: number
   }
 
+  const resolveLineBounds = (value: string, line: number): { start: number; end: number } => {
+    const target = Math.max(1, line)
+    let startIndex = 0
+    let currentLine = 1
+
+    while (currentLine < target && startIndex < value.length) {
+      const nextBreak = value.indexOf('\n', startIndex)
+      if (nextBreak === -1) {
+        startIndex = value.length
+        break
+      }
+      startIndex = nextBreak + 1
+      currentLine += 1
+    }
+
+    let endIndex = value.indexOf('\n', startIndex)
+    if (endIndex === -1) {
+      endIndex = value.length
+    }
+    if (endIndex > startIndex && value.charCodeAt(endIndex - 1) === 13) {
+      endIndex -= 1
+    }
+
+    return { start: startIndex, end: endIndex }
+  }
+
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const lineViewportRef = useRef<Record<string, LineViewportState>>({})
@@ -221,22 +247,23 @@ function TabManager(): React.JSX.Element {
         return
       }
 
-      const styles = getComputedStyle(textarea)
-      const lineHeight = parseFloat(styles.lineHeight || '20')
-      const paddingTop = parseFloat(styles.paddingTop || '0')
-      const lines = textarea.value.split(/\r?\n/)
-      const targetLine = clamp(line, 1, Math.max(1, lines.length))
-      const safeColumn = clamp(column, 1, (lines[targetLine - 1]?.length ?? 0) + 1)
+      const tabRecord = tabsRef.current.find(
+        (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
+      )
+      const totalLines = tabRecord?.loadedLineCount ?? 1
+      const targetLine = clamp(line, 1, Math.max(1, totalLines))
 
-      let charIndex = 0
-      for (let i = 0; i < targetLine - 1; i += 1) {
-        charIndex += (lines[i]?.length ?? 0) + 1
-      }
+      const { start, end } = resolveLineBounds(textarea.value, targetLine)
+      const lineLength = Math.max(0, end - start)
+      const safeColumn = clamp(column, 1, lineLength + 1)
+      const selectionStart = Math.min(textarea.value.length, start + safeColumn - 1)
 
-      const selectionStart = charIndex + safeColumn - 1
       textarea.focus()
       textarea.setSelectionRange(selectionStart, selectionStart)
 
+      const styles = getComputedStyle(textarea)
+      const lineHeight = parseFloat(styles.lineHeight || '20')
+      const paddingTop = parseFloat(styles.paddingTop || '0')
       const visibleArea = textarea.clientHeight
       const desiredScrollTop = Math.max(0, paddingTop + (targetLine - 1) * lineHeight - visibleArea / 2)
 
@@ -263,7 +290,7 @@ function TabManager(): React.JSX.Element {
         highlightInfoRef.current = null
       }, 2000)
     },
-    [scheduleLineViewportUpdate]
+    [scheduleLineViewportUpdate, tabsRef]
   )
 
   useEffect(() => {
