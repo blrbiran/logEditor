@@ -6,7 +6,8 @@ import type {
   SearchMatch,
   SearchResponsePayload,
   SearchResultItem,
-  ActiveContext
+  ActiveContext,
+  SearchableTab
 } from '@renderer/env'
 import { buildDefaultFilename, generateTabId } from './helpers'
 import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, type Tab, type WelcomeTab } from './tab-types'
@@ -15,6 +16,7 @@ import { countLines, countLinesForAppend } from '@renderer/utils/text-metrics'
 
 const api: LogEditorApi = window.api
 const DEFAULT_CHUNK_SIZE = 512 * 1024
+const LARGE_FILE_SYNC_THRESHOLD_BYTES = 8 * 1024 * 1024
 
 const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
   kind: 'welcome',
@@ -57,6 +59,33 @@ export const useTabsController = (): UseTabsControllerResult => {
   const activeTabIdRef = useRef<string | null>(WELCOME_TAB_ID)
   const activationStackRef = useRef<string[]>([WELCOME_TAB_ID])
   const untitledCounterRef = useRef<number>(1)
+  const pendingSyncMapRef = useRef<Map<string, SearchableTab>>(new Map())
+
+  const enqueueTabStateSync = useCallback((tab: FileTab) => {
+    const shouldOmitContent = tab.isTruncated || tab.size >= LARGE_FILE_SYNC_THRESHOLD_BYTES
+    pendingSyncMapRef.current.set(tab.id, {
+      id: tab.id,
+      title: tab.title,
+      filePath: tab.filePath,
+      content: shouldOmitContent ? '' : tab.content,
+      size: tab.size,
+      isTruncated: tab.isTruncated || shouldOmitContent,
+      loadedRange: tab.loadedRange,
+      lineCount: tab.lineCount,
+      loadedLineCount: tab.loadedLineCount
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!pendingSyncMapRef.current.size) {
+      return
+    }
+    const payloads = Array.from(pendingSyncMapRef.current.values())
+    pendingSyncMapRef.current.clear()
+    payloads.forEach((payload) => {
+      api.syncTabState(payload)
+    })
+  }, [tabs])
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -75,36 +104,6 @@ export const useTabsController = (): UseTabsControllerResult => {
       activationStackRef.current.push(id)
     }
   }, [])
-
-  useEffect(() => {
-    debugLog(
-      'tabs changed',
-      tabs.map((tab) => ({
-        id: tab.id,
-        kind: tab.kind,
-        title: tab.title,
-        isActive: tab.isActive,
-        isDirty: isFileTab(tab) ? tab.isDirty : undefined,
-        filePath: isFileTab(tab) ? tab.filePath : undefined,
-        contentLength: isFileTab(tab) ? tab.content.length : undefined,
-        contentPreview: isFileTab(tab) ? tab.content.slice(0, 80) : undefined
-      }))
-    )
-    tabs.filter(isFileTab).forEach((tab) => {
-      const serializedContent = tab.isTruncated ? '' : tab.content
-      api.syncTabState({
-        id: tab.id,
-        title: tab.title,
-        filePath: tab.filePath,
-        content: serializedContent,
-        size: tab.size,
-        isTruncated: tab.isTruncated,
-        loadedRange: tab.loadedRange,
-        lineCount: tab.lineCount,
-        loadedLineCount: tab.loadedLineCount
-      })
-    })
-  }, [tabs])
 
   useEffect(() => {
     const existingIds = new Set(tabs.map((tab) => tab.id))
@@ -168,6 +167,7 @@ export const useTabsController = (): UseTabsControllerResult => {
         lineCount: 1,
         loadedLineCount: 1
       }
+      enqueueTabStateSync(newTab)
       const nextTabs = [...reset, newTab]
       debugLog('createNewTab:setTabs', {
         previousIds: prev.map((tab) => tab.id),
@@ -176,7 +176,7 @@ export const useTabsController = (): UseTabsControllerResult => {
       return nextTabs
     })
     updateActiveTab(id)
-  }, [updateActiveTab])
+  }, [enqueueTabStateSync, updateActiveTab])
 
   const applyOpenedFiles = useCallback(
     (files: OpenedFile[]) => {
@@ -239,6 +239,7 @@ export const useTabsController = (): UseTabsControllerResult => {
             lineCount: totalLineCount,
             loadedLineCount
           }
+          enqueueTabStateSync(refreshedTab)
           updatedTabs[existingIndex] = refreshedTab
           activeId = refreshedTab.id
         } else {
@@ -270,6 +271,7 @@ export const useTabsController = (): UseTabsControllerResult => {
             lineCount: file.lineCount ?? countLines(file.content),
             loadedLineCount: file.loadedLineCount ?? countLines(file.content)
           }
+          enqueueTabStateSync(newTab)
           updatedTabs = [...updatedTabs, newTab]
           activeId = id
         }
@@ -285,7 +287,7 @@ export const useTabsController = (): UseTabsControllerResult => {
       setTabs(updatedTabs)
       updateActiveTab(nextActiveTabId)
     },
-    [updateActiveTab]
+    [enqueueTabStateSync, updateActiveTab]
   )
 
   const openFiles = useCallback(async () => {
@@ -408,7 +410,7 @@ export const useTabsController = (): UseTabsControllerResult => {
           return tab
         }
         const totalLineCount = countLines(content)
-        return {
+        const updatedTab: FileTab = {
           ...tab,
           content,
           size: content.length,
@@ -418,9 +420,11 @@ export const useTabsController = (): UseTabsControllerResult => {
           lineCount: totalLineCount,
           loadedLineCount: totalLineCount
         }
+        enqueueTabStateSync(updatedTab)
+        return updatedTab
       })
     )
-  }, [])
+  }, [enqueueTabStateSync])
 
   const closeActiveTab = useCallback(() => {
     const currentId = activeTabIdRef.current
@@ -465,21 +469,25 @@ export const useTabsController = (): UseTabsControllerResult => {
       setTabs((prev) =>
         prev.map((tab) =>
           tab.id === currentTab.id && isFileTab(tab)
-            ? {
-                ...tab,
-                filePath: result.filePath,
-                title: newTitle,
-                size: tab.content.length,
-                loadedRange: { start: 0, end: tab.content.length },
-                isTruncated: false,
-                isReadOnly: false,
-                isDirty: false
-              }
+            ? (() => {
+                const updatedTab: FileTab = {
+                  ...tab,
+                  filePath: result.filePath,
+                  title: newTitle,
+                  size: tab.content.length,
+                  loadedRange: { start: 0, end: tab.content.length },
+                  isTruncated: false,
+                  isReadOnly: false,
+                  isDirty: false
+                }
+                enqueueTabStateSync(updatedTab)
+                return updatedTab
+              })()
             : tab
         )
       )
     },
-    []
+    [enqueueTabStateSync]
   )
 
   const handleSearchResults = useCallback((payload: SearchResponsePayload) => {
@@ -584,7 +592,7 @@ export const useTabsController = (): UseTabsControllerResult => {
             const appendedContent = tab.content + range.content
             const appendedLines = countLinesForAppend(range.content, tab.content.endsWith('\n'))
             const nextLoadedLines = tab.loadedLineCount + appendedLines
-            return {
+            const updatedTab: FileTab = {
               ...tab,
               content: appendedContent,
               size: range.totalSize,
@@ -595,6 +603,8 @@ export const useTabsController = (): UseTabsControllerResult => {
               loadedLineCount: nextLoadedLines,
               lineCount: tab.lineCount ?? nextLoadedLines
             }
+            enqueueTabStateSync(updatedTab)
+            return updatedTab
           })
         )
       } catch (error) {
@@ -612,7 +622,7 @@ export const useTabsController = (): UseTabsControllerResult => {
         throw error
       }
     },
-    [api]
+    [api, enqueueTabStateSync]
   )
 
   useEffect(() => {
