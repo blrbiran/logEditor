@@ -11,6 +11,8 @@ import type {
   SaveFileResult,
   FileRangeRequest,
   FileRangePayload,
+  WindowEditPayload,
+  WindowEditResult,
   SearchRequest,
   SearchResponsePayload,
   SearchableTab
@@ -36,6 +38,8 @@ const api: LogEditorApi = {
   openFileDialog: () => invoke<OpenedFile[]>('open-file-dialog'),
   readFilesFromPaths: (filePaths: string[]) => invoke<OpenedFile[]>('read-files-from-paths', filePaths),
   readFileRange: (payload: FileRangeRequest) => invoke<FileRangePayload>('read-file-range', payload),
+  applyWindowEdit: (payload: WindowEditPayload) =>
+    invoke<WindowEditResult>('apply-window-edit', payload),
   saveFileDialog: (payload: SaveFilePayload) => invoke<SaveFileResult>('save-file-dialog', payload),
   performSearch: (payload: SearchRequest) => invoke<SearchResponsePayload>('perform-search', payload),
   syncTabState: (tab: SearchableTab): void => {

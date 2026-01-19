@@ -236,7 +236,8 @@ function TabManager(): React.JSX.Element {
     closeTab,
     updateTabContent,
     handleSearchResultSelect,
-    loadMoreContent
+    loadMoreContent,
+    ensureLineVisible
   } = useTabsController()
 
   const focusLine = useCallback(
@@ -251,7 +252,9 @@ function TabManager(): React.JSX.Element {
         (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
       )
       const totalLines = tabRecord?.loadedLineCount ?? 1
-      const targetLine = clamp(line, 1, Math.max(1, totalLines))
+      const windowStart = tabRecord?.isWindowed ? tabRecord.lineWindowStart : 1
+      const relativeLine = tabRecord?.isWindowed ? line - windowStart + 1 : line
+      const targetLine = clamp(relativeLine, 1, Math.max(1, totalLines))
 
       const { start, end } = resolveLineBounds(textarea.value, targetLine)
       const lineLength = Math.max(0, end - start)
@@ -361,13 +364,17 @@ function TabManager(): React.JSX.Element {
         return
       }
       switchTab(payload.tabId)
-      requestAnimationFrame(() => focusLine(payload.tabId, payload.line, payload.column))
+      const ensureAndFocus = async () => {
+        await ensureLineVisible(payload.tabId, payload.line)
+        requestAnimationFrame(() => focusLine(payload.tabId, payload.line, payload.column))
+      }
+      void ensureAndFocus()
     })
 
     return () => {
       disposer()
     }
-  }, [focusLine, switchTab, tabsRef])
+  }, [ensureLineVisible, focusLine, switchTab, tabsRef])
 
   useEffect(() => {
     tabs.forEach((tab) => {
@@ -445,6 +452,32 @@ function TabManager(): React.JSX.Element {
   const handleFileScroll = useCallback(
     (tab: FileTab, textarea: HTMLTextAreaElement) => {
       scheduleLineViewportUpdate(tab.id, textarea)
+      if (tab.isWindowed) {
+        if (tab.isLoadingMore || tab.isDirty) {
+          return
+        }
+        const scrollable = textarea.scrollHeight - textarea.clientHeight
+        if (scrollable <= 0) {
+          return
+        }
+        const scrollRatio = textarea.scrollTop / scrollable
+        if (scrollRatio > 0.95) {
+          void loadMoreContent(tab.id, 'forward').catch((error) => {
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.error('[TabManager] window shift forward failed', error)
+            }
+          })
+        } else if (scrollRatio < 0.05) {
+          void loadMoreContent(tab.id, 'backward').catch((error) => {
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.error('[TabManager] window shift backward failed', error)
+            }
+          })
+        }
+        return
+      }
       if (!tab.isTruncated || tab.isLoadingMore) {
         return
       }
@@ -460,7 +493,7 @@ function TabManager(): React.JSX.Element {
       const targetRatio = targetLine / totalLines
       if (targetRatio >= loadedRatio - 0.02) {
         autoScrollIntentRef.current[tab.id] = scrollRatio > 0.9
-        void loadMoreContent(tab.id).catch((error) => {
+        void loadMoreContent(tab.id, 'forward').catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
             console.error('[TabManager] auto load failed', error)
@@ -537,35 +570,12 @@ function TabManager(): React.JSX.Element {
     (result: SearchResultItem, match: SearchMatch) => {
       handleSearchResultSelect(result, match)
       const ensureLoaded = async () => {
-        const MAX_ITERATIONS = 400
-        let attempts = 0
-        while (attempts < MAX_ITERATIONS) {
-          attempts += 1
-          const targetTab = tabsRef.current.find((tab) => tab.id === result.tabId)
-          if (!targetTab || !isFileTab(targetTab) || !targetTab.isTruncated) {
-            break
-          }
-          if (match.line <= targetTab.loadedLineCount) {
-            break
-          }
-          try {
-            await loadMoreContent(targetTab.id)
-            await new Promise((resolve) => {
-              window.requestAnimationFrame(() => resolve(undefined))
-            })
-          } catch (error) {
-            if (import.meta.env.DEV) {
-              // eslint-disable-next-line no-console
-              console.error('[TabManager] failed to auto-load chunk', error)
-            }
-            break
-          }
-        }
+        await ensureLineVisible(result.tabId, match.line)
         requestAnimationFrame(() => focusLine(result.tabId, match.line, match.column))
       }
       void ensureLoaded()
     },
-    [focusLine, handleSearchResultSelect, loadMoreContent, tabsRef]
+    [ensureLineVisible, focusLine, handleSearchResultSelect]
   )
 
   const renderSearchContent = useCallback(
@@ -591,9 +601,64 @@ function TabManager(): React.JSX.Element {
         Math.min(viewport.visibleLines, remaining, MAX_RENDERED_LINE_NUMBERS)
       )
       const lineNumbers = Array.from({ length: lineRenderCount }, (_, index) => safeFirstLine + index)
+      const windowStartLine = Math.max(1, tab.lineWindowStart)
+      const windowEndLine = windowStartLine + Math.max(0, tab.loadedLineCount - 1)
+      const totalKnownLines = Math.max(1, tab.lineCount)
+      const displayLineNumbers = lineNumbers.map((lineNumber) => {
+        const globalLineNumber = windowStartLine + lineNumber - 1
+        return Math.max(1, Math.min(globalLineNumber, totalKnownLines))
+      })
+      const canShiftBackward = tab.loadedRange.start > 0
+      const canShiftForward = tab.loadedRange.end < tab.size
+      const disableWindowShift = tab.isLoadingMore || tab.isDirty
+      const requestWindowShift = (direction: 'forward' | 'backward') => {
+        void loadMoreContent(tab.id, direction).catch((error) => {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.error('[TabManager] window shift failed', direction, error)
+          }
+        })
+      }
       return (
         <div className="relative flex h-full flex-col">
-          {tab.isReadOnly ? (
+          {tab.isWindowed ? (
+            <div className="flex flex-col gap-1 border-b border-sky-200 bg-sky-50 px-4 py-2 text-xs text-sky-900">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-semibold text-sky-950">Windowed editing</span>
+                <span>
+                  Lines {windowStartLine.toLocaleString()}–{windowEndLine.toLocaleString()} of{' '}
+                  {tab.lineCount.toLocaleString()}
+                </span>
+                <span>
+                  Window {formatBytes(loadedBytes)} · chunk {formatBytes(tab.chunkSize)} · overlap{' '}
+                  {formatBytes(tab.windowOverlap)}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded border border-sky-400 px-3 py-1 font-semibold text-sky-900 transition hover:border-sky-500 hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={disableWindowShift || !canShiftBackward}
+                  onClick={() => requestWindowShift('backward')}
+                >
+                  {tab.isLoadingMore ? 'Loading…' : 'Previous window'}
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-sky-400 px-3 py-1 font-semibold text-sky-900 transition hover:border-sky-500 hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={disableWindowShift || !canShiftForward}
+                  onClick={() => requestWindowShift('forward')}
+                >
+                  {tab.isLoadingMore ? 'Loading…' : 'Next window'}
+                </button>
+                <span className={`text-xs ${tab.isDirty ? 'text-rose-600' : 'text-slate-600'}`}>
+                  {tab.isDirty
+                    ? 'Save this window before moving to another section.'
+                    : 'Scroll or use the controls to move through the file without loading it entirely.'}
+                </span>
+              </div>
+            </div>
+          ) : tab.isReadOnly ? (
             <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
               <div className="flex flex-col">
                 <span className="font-semibold">Large file preview (read-only)</span>
@@ -635,16 +700,16 @@ function TabManager(): React.JSX.Element {
                   paddingTop: `${viewport.paddingTop}px`
                 }}
               >
-                {lineNumbers.map((lineNumber) => (
+                {displayLineNumbers.map((globalLineNumber) => (
                   <span
-                    key={`${tab.id}-line-${lineNumber}`}
+                    key={`${tab.id}-line-${globalLineNumber}`}
                     className="block"
                     style={{
                       height: `${viewport.lineHeight}px`,
                       lineHeight: `${viewport.lineHeight}px`
                     }}
                   >
-                    {lineNumber}
+                    {globalLineNumber.toLocaleString()}
                   </span>
                 ))}
               </div>

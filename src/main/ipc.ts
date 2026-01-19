@@ -1,7 +1,8 @@
 import { ipcMain, dialog } from 'electron'
-import { promises as fs, createReadStream } from 'fs'
-import { basename } from 'path'
+import { promises as fs, createReadStream, createWriteStream } from 'fs'
+import { basename, join } from 'path'
 import { TextDecoder } from 'util'
+import { tmpdir } from 'os'
 import type { WindowManager } from './window-manager'
 import type { SearchService } from './search-service'
 import type {
@@ -12,7 +13,9 @@ import type {
   SearchResponsePayload,
   SearchableTab,
   FileRangeRequest,
-  FileRangePayload
+  FileRangePayload,
+  WindowEditPayload,
+  WindowEditResult
 } from '../common/ipc'
 
 type RegisterIpcDeps = {
@@ -24,6 +27,7 @@ type RegisterIpcDeps = {
 const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
 const DEFAULT_CHUNK_SIZE = 512 * 1024
 const textDecoder = new TextDecoder('utf-8')
+const lineCache = new Map<string, Map<number, number>>()
 
 const countLinesInText = (value: string): number => {
   if (!value.length) {
@@ -59,6 +63,134 @@ const countLinesInFile = async (filePath: string): Promise<number> => {
       reject(error)
     })
   })
+}
+
+const getOrInitLineCache = (filePath: string): Map<number, number> => {
+  let cache = lineCache.get(filePath)
+  if (!cache) {
+    cache = new Map([[0, 1]])
+    lineCache.set(filePath, cache)
+  }
+  return cache
+}
+
+const getLineNumberForOffset = async (filePath: string, offset: number): Promise<number> => {
+  if (offset <= 0) {
+    return 1
+  }
+
+  const cache = getOrInitLineCache(filePath)
+  let nearestOffset = 0
+  let nearestLine = 1
+
+  cache.forEach((line, cachedOffset) => {
+    if (cachedOffset <= offset && cachedOffset >= nearestOffset) {
+      nearestOffset = cachedOffset
+      nearestLine = line
+    }
+  })
+
+  if (nearestOffset === offset) {
+    return nearestLine
+  }
+
+  const handle = await fs.open(filePath, 'r')
+  try {
+    const bufferSize = 256 * 1024
+    const buffer = Buffer.alloc(bufferSize)
+    let currentOffset = nearestOffset
+    let currentLine = nearestLine
+
+    while (currentOffset < offset) {
+      const toRead = Math.min(bufferSize, offset - currentOffset)
+      const { bytesRead } = await handle.read(buffer, 0, toRead, currentOffset)
+      if (bytesRead === 0) {
+        break
+      }
+      for (let index = 0; index < bytesRead; index += 1) {
+        if (buffer[index] === 10) {
+          currentLine += 1
+        }
+      }
+      currentOffset += bytesRead
+    }
+
+    cache.set(offset, currentLine)
+    return currentLine
+  } finally {
+    await handle.close()
+  }
+}
+
+const copySegment = async (
+  filePath: string,
+  writeStream: ReturnType<typeof createWriteStream>,
+  start: number,
+  end: number | null
+): Promise<void> => {
+  const readStream = createReadStream(filePath, {
+    start,
+    end: typeof end === 'number' ? Math.max(start, end) - 1 : undefined
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    const handleError = (error: Error): void => {
+      readStream.destroy()
+      reject(error)
+    }
+    readStream.on('error', handleError)
+    writeStream.on('error', handleError)
+    readStream.on('end', () => resolve())
+    readStream.pipe(writeStream, { end: false })
+  })
+}
+
+const applyWindowEdit = async ({
+  filePath,
+  rangeStart,
+  rangeEnd,
+  replacement
+}: WindowEditPayload): Promise<WindowEditResult> => {
+  if (!Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd) || rangeStart < 0 || rangeEnd < rangeStart) {
+    throw new Error('Invalid edit range')
+  }
+
+  const tempPath = join(tmpdir(), `logeditor-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`)
+  const writeStream = createWriteStream(tempPath, { encoding: 'utf-8' })
+
+  try {
+    await copySegment(filePath, writeStream, 0, rangeStart)
+    await new Promise<void>((resolve, reject) => {
+      writeStream.write(replacement, (error) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    })
+    await copySegment(filePath, writeStream, rangeEnd, null)
+    await new Promise<void>((resolve, reject) => {
+      writeStream.end((error) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    })
+
+    await fs.rename(tempPath, filePath)
+    lineCache.delete(filePath)
+    const stats = await fs.stat(filePath)
+    return {
+      filePath,
+      size: stats.size
+    }
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
@@ -167,13 +299,18 @@ const readFileRange = async ({
     const content = textDecoder.decode(buffer.subarray(0, bytesRead))
 
     const nextEnd = safeStart + bytesRead
+    const startLine = await getLineNumberForOffset(filePath, safeStart)
+    const lineCount = countLinesInText(content)
+    getOrInitLineCache(filePath).set(nextEnd, startLine + lineCount)
     return {
       filePath,
       start: safeStart,
       end: nextEnd,
       content,
       totalSize,
-      hasMore: nextEnd < totalSize
+      hasMore: nextEnd < totalSize,
+      startLine,
+      lineCount
     }
   } finally {
     await handle.close()
@@ -236,8 +373,17 @@ export const registerIpcHandlers = ({
     }
   })
 
+  ipcMain.handle('apply-window-edit', async (_event, payload: WindowEditPayload): Promise<WindowEditResult> => {
+    try {
+      return await applyWindowEdit(payload)
+    } catch (error) {
+      console.error('Failed to apply window edit', payload?.filePath, error)
+      throw error
+    }
+  })
+
   ipcMain.handle('save-file-dialog', async (_event, payload: SaveFilePayload) => {
-    const { filePath, content, defaultPath } = payload
+    const { filePath, content, defaultPath, sourcePath } = payload
     let targetPath = filePath
 
     if (!targetPath) {
@@ -258,8 +404,14 @@ export const registerIpcHandlers = ({
       targetPath = result.filePath
     }
 
-    await fs.writeFile(targetPath, content, 'utf-8')
-    searchService.updateTabContentByFilePath(targetPath, content)
+    if (sourcePath) {
+      await fs.copyFile(sourcePath, targetPath)
+    } else if (typeof content === 'string') {
+      await fs.writeFile(targetPath, content, 'utf-8')
+      searchService.updateTabContentByFilePath(targetPath, content)
+    } else {
+      throw new Error('Missing content for save operation')
+    }
 
     return { canceled: false, filePath: targetPath }
   })

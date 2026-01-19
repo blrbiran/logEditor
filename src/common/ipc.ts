@@ -56,7 +56,8 @@ export type SearchableTab = {
 export type SaveFilePayload = {
   filePath?: string
   defaultPath?: string
-  content: string
+  content?: string
+  sourcePath?: string
 }
 
 export type SaveFileResult = {
@@ -89,11 +90,25 @@ export type FileRangePayload = {
   content: string
   totalSize: number
   hasMore: boolean
+  startLine: number
+  lineCount: number
 }
 
 export type FileLoadedRange = {
   start: number
   end: number
+}
+
+export type WindowEditPayload = {
+  filePath: string
+  rangeStart: number
+  rangeEnd: number
+  replacement: string
+}
+
+export type WindowEditResult = {
+  filePath: string
+  size: number
 }
 
 export type ActiveContext =
@@ -105,6 +120,7 @@ export interface LogEditorApi {
   openFileDialog(): Promise<OpenedFile[]>
   readFilesFromPaths(filePaths: string[]): Promise<OpenedFile[]>
   readFileRange(payload: FileRangeRequest): Promise<FileRangePayload>
+  applyWindowEdit(payload: WindowEditPayload): Promise<WindowEditResult>
   saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
   performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
   syncTabState(tab: SearchableTab): void

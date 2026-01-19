@@ -16,6 +16,10 @@ import { countLines, countLinesForAppend } from '@renderer/utils/text-metrics'
 
 const api: LogEditorApi = window.api
 const DEFAULT_CHUNK_SIZE = 512 * 1024
+const WINDOW_OVERLAP_BYTES = 64 * 1024
+const textEncoder = new TextEncoder()
+
+const getByteLength = (value: string): number => textEncoder.encode(value).length
 const LARGE_FILE_SYNC_THRESHOLD_BYTES = 8 * 1024 * 1024
 
 const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
@@ -41,7 +45,8 @@ type UseTabsControllerResult = {
   updateTabContent(tabId: string, content: string): void
   handleSave(forceSaveAs: boolean): Promise<void>
   handleSearchResultSelect(result: SearchResultItem, match: SearchMatch): void
-  loadMoreContent(tabId: string): Promise<void>
+  loadMoreContent(tabId: string, direction?: 'forward' | 'backward'): Promise<void>
+  ensureLineVisible(tabId: string, line: number): Promise<void>
 }
 
 const debugLog = (...args: unknown[]): void => {
@@ -165,7 +170,11 @@ export const useTabsController = (): UseTabsControllerResult => {
         isDirty: false,
         isActive: true,
         lineCount: 1,
-        loadedLineCount: 1
+        loadedLineCount: 1,
+        lineWindowStart: 1,
+        isWindowed: false,
+        windowOverlap: WINDOW_OVERLAP_BYTES,
+        hasWindowEdits: false
       }
       enqueueTabStateSync(newTab)
       const nextTabs = [...reset, newTab]
@@ -232,12 +241,16 @@ export const useTabsController = (): UseTabsControllerResult => {
             loadedRange: { start: 0, end: loadedBytes },
             chunkSize,
             isTruncated: Boolean(file.isTruncated && filePath),
-            isReadOnly: Boolean(file.isTruncated && filePath),
+            isReadOnly: false,
             isLoadingMore: false,
             isDirty: false,
             isActive: true,
             lineCount: totalLineCount,
-            loadedLineCount
+            loadedLineCount,
+            lineWindowStart: 1,
+            isWindowed: Boolean(file.isTruncated && filePath),
+            windowOverlap: Math.min(WINDOW_OVERLAP_BYTES, Math.floor(chunkSize / 2)),
+            hasWindowEdits: false
           }
           enqueueTabStateSync(refreshedTab)
           updatedTabs[existingIndex] = refreshedTab
@@ -264,12 +277,16 @@ export const useTabsController = (): UseTabsControllerResult => {
             loadedRange: { start: 0, end: loadedBytes },
             chunkSize,
             isTruncated: Boolean(file.isTruncated && filePath),
-            isReadOnly: Boolean(file.isTruncated && filePath),
+            isReadOnly: false,
             isLoadingMore: false,
             isDirty: false,
             isActive: true,
             lineCount: file.lineCount ?? countLines(file.content),
-            loadedLineCount: file.loadedLineCount ?? countLines(file.content)
+            loadedLineCount: file.loadedLineCount ?? countLines(file.content),
+            lineWindowStart: 1,
+            isWindowed: Boolean(file.isTruncated && filePath),
+            windowOverlap: Math.min(WINDOW_OVERLAP_BYTES, Math.floor(chunkSize / 2)),
+            hasWindowEdits: false
           }
           enqueueTabStateSync(newTab)
           updatedTabs = [...updatedTabs, newTab]
@@ -410,6 +427,19 @@ export const useTabsController = (): UseTabsControllerResult => {
           return tab
         }
         const totalLineCount = countLines(content)
+        if (tab.isWindowed) {
+          const lineDelta = totalLineCount - tab.loadedLineCount
+          const updatedTab: FileTab = {
+            ...tab,
+            content,
+            isDirty: true,
+            loadedLineCount: totalLineCount,
+            lineCount: Math.max(1, tab.lineCount + lineDelta),
+            hasWindowEdits: true
+          }
+          enqueueTabStateSync(updatedTab)
+          return updatedTab
+        }
         const updatedTab: FileTab = {
           ...tab,
           content,
@@ -418,7 +448,8 @@ export const useTabsController = (): UseTabsControllerResult => {
           isTruncated: false,
           isDirty: true,
           lineCount: totalLineCount,
-          loadedLineCount: totalLineCount
+          loadedLineCount: totalLineCount,
+          hasWindowEdits: false
         }
         enqueueTabStateSync(updatedTab)
         return updatedTab
@@ -442,9 +473,90 @@ export const useTabsController = (): UseTabsControllerResult => {
 
   const handleSave = useCallback(
     async (forceSaveAs: boolean) => {
-      const currentTab = tabsRef.current.find((tab): tab is FileTab => tab.id === activeTabIdRef.current && isFileTab(tab))
+      const currentTab = tabsRef.current.find(
+        (tab): tab is FileTab => tab.id === activeTabIdRef.current && isFileTab(tab)
+      )
       if (!currentTab) {
         debugLog('handleSave skipped: no current file tab')
+        return
+      }
+
+      if (currentTab.isWindowed && currentTab.filePath) {
+        const applyWindowChanges = async (targetPath: string, updateTitle: boolean) => {
+          const replacementLength = getByteLength(currentTab.content)
+          const result = await api.applyWindowEdit({
+            filePath: targetPath,
+            rangeStart: currentTab.loadedRange.start,
+            rangeEnd: currentTab.loadedRange.end,
+            replacement: currentTab.content
+          })
+          const nextTitle = updateTitle ? window.electron.path.basename(targetPath) : currentTab.title
+          debugLog('handleSave window patch applied', {
+            tabId: currentTab.id,
+            targetPath,
+            replacementLength
+          })
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== currentTab.id || !isFileTab(tab)) {
+                return tab
+              }
+              const updatedTab: FileTab = {
+                ...tab,
+                filePath: targetPath,
+                title: nextTitle,
+                size: result.size,
+                loadedRange: {
+                  start: tab.loadedRange.start,
+                  end: tab.loadedRange.start + replacementLength
+                },
+                isDirty: false,
+                hasWindowEdits: false
+              }
+              enqueueTabStateSync(updatedTab)
+              return updatedTab
+            })
+          )
+        }
+
+        if (forceSaveAs) {
+          const result: SaveFileResult = await api.saveFileDialog({
+            filePath: undefined,
+            defaultPath: currentTab.filePath ?? buildDefaultFilename(currentTab.title),
+            sourcePath: currentTab.filePath
+          })
+          if (result.canceled || !result.filePath) {
+            debugLog('handleSave Save As canceled', result)
+            return
+          }
+          if (currentTab.isDirty) {
+            await applyWindowChanges(result.filePath, true)
+          } else {
+            const newTitle = window.electron.path.basename(result.filePath)
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== currentTab.id || !isFileTab(tab)) {
+                  return tab
+                }
+                const updatedTab: FileTab = {
+                  ...tab,
+                  filePath: result.filePath,
+                  title: newTitle
+                }
+                enqueueTabStateSync(updatedTab)
+                return updatedTab
+              })
+            )
+          }
+          return
+        }
+
+        if (!currentTab.isDirty) {
+          debugLog('handleSave skipped: window has no changes', currentTab.id)
+          return
+        }
+
+        await applyWindowChanges(currentTab.filePath, false)
         return
       }
 
@@ -540,7 +652,7 @@ export const useTabsController = (): UseTabsControllerResult => {
   }, [updateActiveTab])
 
   const loadMoreContent = useCallback(
-    async (tabId: string) => {
+    async (tabId: string, direction: 'forward' | 'backward' = 'forward') => {
       const target = tabsRef.current.find(
         (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
       )
@@ -552,6 +664,87 @@ export const useTabsController = (): UseTabsControllerResult => {
         debugLog('loadMoreContent skipped: tab has no file path', tabId)
         return
       }
+      if (target.isWindowed) {
+        if (target.isDirty) {
+          debugLog('loadMoreContent blocked: unsaved edits in window', tabId)
+          throw new Error('Save or discard current edits before moving to another section.')
+        }
+
+        if (direction === 'forward' && target.loadedRange.end >= target.size) {
+          debugLog('loadMoreContent skipped: reached end of file', tabId)
+          return
+        }
+        if (direction === 'backward' && target.loadedRange.start === 0) {
+          debugLog('loadMoreContent skipped: already at start', tabId)
+          return
+        }
+
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === tabId && isFileTab(tab)
+              ? {
+                  ...tab,
+                  isLoadingMore: true
+                }
+              : tab
+          )
+        )
+
+        try {
+          const chunkSize = target.chunkSize > 0 ? target.chunkSize : DEFAULT_CHUNK_SIZE
+          const overlap = Math.min(target.windowOverlap, Math.floor(chunkSize / 4))
+          const forwardStart = Math.min(
+            target.size - chunkSize,
+            Math.max(target.loadedRange.end - overlap, target.loadedRange.start)
+          )
+          const backwardStart = Math.max(0, target.loadedRange.start - (chunkSize - overlap))
+          const nextStart = direction === 'forward' ? Math.max(0, forwardStart) : backwardStart
+          const range = await api.readFileRange({
+            filePath: target.filePath,
+            start: nextStart,
+            length: chunkSize
+          })
+          debugLog('loadMoreContent window shift', {
+            tabId,
+            direction,
+            start: range.start,
+            end: range.end,
+            startLine: range.startLine,
+            lineCount: range.lineCount
+          })
+          const windowed = range.start > 0 || range.end < range.totalSize
+          const updatedTab: FileTab = {
+            ...target,
+            content: range.content,
+            size: range.totalSize,
+            loadedRange: { start: range.start, end: range.end },
+            loadedLineCount: range.lineCount ?? countLines(range.content),
+            lineWindowStart: range.startLine ?? target.lineWindowStart,
+            isTruncated: windowed,
+            isWindowed: windowed,
+            isLoadingMore: false,
+            hasWindowEdits: false
+          }
+          enqueueTabStateSync(updatedTab)
+          setTabs((prev) =>
+            prev.map((tab) => (tab.id === tabId && isFileTab(tab) ? updatedTab : tab))
+          )
+        } catch (error) {
+          setTabs((prev) =>
+            prev.map((tab) =>
+              tab.id === tabId && isFileTab(tab)
+                ? {
+                    ...tab,
+                    isLoadingMore: false
+                  }
+                : tab
+            )
+          )
+          throw error
+        }
+        return
+      }
+
       if (!target.isTruncated) {
         debugLog('loadMoreContent skipped: tab fully loaded', tabId)
         return
@@ -625,6 +818,33 @@ export const useTabsController = (): UseTabsControllerResult => {
     [api, enqueueTabStateSync]
   )
 
+  const ensureLineVisible = useCallback(
+    async (tabId: string, line: number) => {
+      const MAX_ITERATIONS = 200
+      let iterations = 0
+      while (iterations < MAX_ITERATIONS) {
+        iterations += 1
+        const target = tabsRef.current.find(
+          (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
+        )
+        if (!target || !target.isWindowed) {
+          break
+        }
+        const windowStart = target.lineWindowStart
+        const windowEnd = target.lineWindowStart + Math.max(0, target.loadedLineCount - 1)
+        if (line >= windowStart && line <= windowEnd) {
+          break
+        }
+        if (line < windowStart) {
+          await loadMoreContent(tabId, 'backward')
+        } else {
+          await loadMoreContent(tabId, 'forward')
+        }
+      }
+    },
+    [loadMoreContent]
+  )
+
   useEffect(() => {
     const disposers = [
       api.onMenuNewFile(() => createNewTab()),
@@ -656,6 +876,7 @@ export const useTabsController = (): UseTabsControllerResult => {
     updateTabContent,
     handleSave,
     handleSearchResultSelect,
-    loadMoreContent
+    loadMoreContent,
+    ensureLineVisible
   }
 }

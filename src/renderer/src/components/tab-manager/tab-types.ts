@@ -18,6 +18,10 @@ export type FileTab = {
   isActive: boolean
   lineCount: number
   loadedLineCount: number
+  lineWindowStart: number
+  isWindowed: boolean
+  windowOverlap: number
+  hasWindowEdits: boolean
 }
 
 export type SearchTab = {
