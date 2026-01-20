@@ -7,9 +7,10 @@ import type {
   SearchResponsePayload,
   SearchResultItem,
   ActiveContext,
-  SearchableTab
+  SearchableTab,
+  FileRangePayload
 } from '@renderer/env'
-import { buildDefaultFilename, generateTabId } from './helpers'
+import { buildDefaultFilename, clamp, generateTabId } from './helpers'
 import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, type Tab, type WelcomeTab } from './tab-types'
 import { buildSearchTabTitle } from './search-utils'
 import { countLines, countLinesForAppend } from '@renderer/utils/text-metrics'
@@ -46,6 +47,7 @@ type UseTabsControllerResult = {
   handleSave(forceSaveAs: boolean): Promise<void>
   handleSearchResultSelect(result: SearchResultItem, match: SearchMatch): void
   loadMoreContent(tabId: string, direction?: 'forward' | 'backward'): Promise<void>
+  jumpToFilePosition(tabId: string, ratio: number): Promise<void>
   ensureLineVisible(tabId: string, line: number): Promise<void>
 }
 
@@ -53,6 +55,24 @@ const debugLog = (...args: unknown[]): void => {
   if (import.meta.env.DEV) {
     // eslint-disable-next-line no-console
     console.log('[TabManager]', ...args)
+  }
+}
+
+const buildWindowedTabState = (tab: FileTab, range: FileRangePayload): FileTab => {
+  const lineCount = range.lineCount ?? countLines(range.content)
+  const startLine = range.startLine ?? tab.lineWindowStart
+  const windowed = range.start > 0 || range.end < range.totalSize
+  return {
+    ...tab,
+    content: range.content,
+    size: range.totalSize,
+    loadedRange: { start: range.start, end: range.end },
+    loadedLineCount: lineCount,
+    lineWindowStart: startLine,
+    isTruncated: windowed || tab.isTruncated,
+    isWindowed: windowed,
+    isLoadingMore: false,
+    hasWindowEdits: false
   }
 }
 
@@ -232,23 +252,28 @@ export const useTabsController = (): UseTabsControllerResult => {
               : file.content.length
           const totalLineCount = file.lineCount ?? countLines(file.content)
           const loadedLineCount = file.loadedLineCount ?? countLines(file.content)
+          const incomingFilePath = file.filePath && file.filePath.length > 0 ? file.filePath : undefined
+          const effectiveFilePath = incomingFilePath ?? existingTab.filePath
+          const canEdit = Boolean(effectiveFilePath)
+          const isWindowed = Boolean(file.isTruncated && canEdit)
+          const isTruncated = Boolean(file.isTruncated)
           const refreshedTab: FileTab = {
             ...existingTab,
             content: file.content,
             title: fileName,
-            filePath: filePath && filePath.length > 0 ? filePath : existingTab.filePath,
+            filePath: effectiveFilePath,
             size: file.size ?? loadedBytes,
             loadedRange: { start: 0, end: loadedBytes },
             chunkSize,
-            isTruncated: Boolean(file.isTruncated && filePath),
-            isReadOnly: false,
+            isTruncated,
+            isReadOnly: !canEdit,
             isLoadingMore: false,
             isDirty: false,
             isActive: true,
             lineCount: totalLineCount,
             loadedLineCount,
             lineWindowStart: 1,
-            isWindowed: Boolean(file.isTruncated && filePath),
+            isWindowed,
             windowOverlap: Math.min(WINDOW_OVERLAP_BYTES, Math.floor(chunkSize / 2)),
             hasWindowEdits: false
           }
@@ -267,24 +292,28 @@ export const useTabsController = (): UseTabsControllerResult => {
               ? file.loadedBytes
               : file.content.length
           const chunkSize = file.chunkSize > 0 ? file.chunkSize : DEFAULT_CHUNK_SIZE
+          const incomingFilePath = file.filePath && file.filePath.length > 0 ? file.filePath : undefined
+          const canEdit = Boolean(incomingFilePath)
+          const isWindowed = Boolean(file.isTruncated && canEdit)
+          const isTruncated = Boolean(file.isTruncated)
           const newTab: FileTab = {
             kind: 'file',
             id,
             title: fileName,
-            filePath: filePath && filePath.length > 0 ? filePath : undefined,
+            filePath: incomingFilePath,
             content: file.content,
             size: file.size ?? loadedBytes,
             loadedRange: { start: 0, end: loadedBytes },
             chunkSize,
-            isTruncated: Boolean(file.isTruncated && filePath),
-            isReadOnly: false,
+            isTruncated,
+            isReadOnly: !canEdit,
             isLoadingMore: false,
             isDirty: false,
             isActive: true,
             lineCount: file.lineCount ?? countLines(file.content),
             loadedLineCount: file.loadedLineCount ?? countLines(file.content),
             lineWindowStart: 1,
-            isWindowed: Boolean(file.isTruncated && filePath),
+            isWindowed,
             windowOverlap: Math.min(WINDOW_OVERLAP_BYTES, Math.floor(chunkSize / 2)),
             hasWindowEdits: false
           }
@@ -712,19 +741,7 @@ export const useTabsController = (): UseTabsControllerResult => {
             startLine: range.startLine,
             lineCount: range.lineCount
           })
-          const windowed = range.start > 0 || range.end < range.totalSize
-          const updatedTab: FileTab = {
-            ...target,
-            content: range.content,
-            size: range.totalSize,
-            loadedRange: { start: range.start, end: range.end },
-            loadedLineCount: range.lineCount ?? countLines(range.content),
-            lineWindowStart: range.startLine ?? target.lineWindowStart,
-            isTruncated: windowed,
-            isWindowed: windowed,
-            isLoadingMore: false,
-            hasWindowEdits: false
-          }
+          const updatedTab = buildWindowedTabState(target, range)
           enqueueTabStateSync(updatedTab)
           setTabs((prev) =>
             prev.map((tab) => (tab.id === tabId && isFileTab(tab) ? updatedTab : tab))
@@ -818,6 +835,75 @@ export const useTabsController = (): UseTabsControllerResult => {
     [api, enqueueTabStateSync]
   )
 
+  const jumpToFilePosition = useCallback(
+    async (tabId: string, ratio: number) => {
+      const target = tabsRef.current.find(
+        (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
+      )
+      if (!target || !target.isWindowed) {
+        debugLog('jumpToFilePosition skipped: tab not windowed', tabId)
+        return
+      }
+      if (!target.filePath) {
+        debugLog('jumpToFilePosition skipped: missing file path', tabId)
+        return
+      }
+      if (target.isDirty || target.isLoadingMore) {
+        debugLog('jumpToFilePosition blocked: dirty or loading', tabId)
+        return
+      }
+
+      const safeRatio = clamp(Number.isFinite(ratio) ? ratio : 0, 0, 1)
+      const chunkSize = target.chunkSize > 0 ? target.chunkSize : DEFAULT_CHUNK_SIZE
+      const anchor = Math.round(target.size * safeRatio)
+      const start = clamp(Math.round(anchor - chunkSize / 2), 0, Math.max(0, target.size - chunkSize))
+
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === tabId && isFileTab(tab)
+            ? {
+                ...tab,
+                isLoadingMore: true
+              }
+            : tab
+        )
+      )
+
+      try {
+        const range = await api.readFileRange({
+          filePath: target.filePath,
+          start,
+          length: chunkSize
+        })
+        debugLog('jumpToFilePosition resolved', {
+          tabId,
+          ratio: safeRatio,
+          start: range.start,
+          end: range.end
+        })
+        const updatedTab = buildWindowedTabState(target, range)
+        enqueueTabStateSync(updatedTab)
+        setTabs((prev) =>
+          prev.map((tab) => (tab.id === tabId && isFileTab(tab) ? updatedTab : tab))
+        )
+      } catch (error) {
+        debugLog('jumpToFilePosition failed', { tabId, error })
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === tabId && isFileTab(tab)
+              ? {
+                  ...tab,
+                  isLoadingMore: false
+                }
+              : tab
+          )
+        )
+        throw error
+      }
+    },
+    [api, enqueueTabStateSync]
+  )
+
   const ensureLineVisible = useCallback(
     async (tabId: string, line: number) => {
       const MAX_ITERATIONS = 200
@@ -877,6 +963,7 @@ export const useTabsController = (): UseTabsControllerResult => {
     handleSave,
     handleSearchResultSelect,
     loadMoreContent,
+    jumpToFilePosition,
     ensureLineVisible
   }
 }

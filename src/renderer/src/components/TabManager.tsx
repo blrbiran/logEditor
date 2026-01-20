@@ -4,6 +4,7 @@ import type { LogEditorApi, OpenedFile, SearchMatch, SearchResultItem } from '@r
 import { SearchResultsPanel } from './tab-manager/SearchResultsPanel'
 import { LINE_NUMBER_GUTTER_WIDTH } from './tab-manager/constants'
 import { clamp } from './tab-manager/helpers'
+import { WindowedScrollBar } from './tab-manager/WindowedScrollBar'
 import { useTabsController } from './tab-manager/useTabsController'
 import {
   isFileTab,
@@ -19,6 +20,7 @@ const api: LogEditorApi = window.api
 const DEFAULT_CHUNK_SIZE = 512 * 1024
 const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
 const MAX_RENDERED_LINE_NUMBERS = 400
+const MAX_LINE_NUMBER_GUTTER_WIDTH = 160
 
 const formatBytes = (size: number): string => {
   if (!Number.isFinite(size) || size <= 0) {
@@ -72,6 +74,20 @@ const collectDroppedFilePaths = (transfer: DataTransfer | null): string[] => {
   }
 
   return Array.from(filePaths)
+}
+
+const estimateLineNumberGutterWidth = (tab: FileTab | null | undefined): number => {
+  if (!tab) {
+    return LINE_NUMBER_GUTTER_WIDTH
+  }
+  const windowEndLine = tab.lineWindowStart + Math.max(0, tab.loadedLineCount - 1)
+  const knownLines = Math.max(tab.lineCount, windowEndLine, 1)
+  const digits = knownLines > 0 ? Math.floor(Math.log10(knownLines)) + 1 : 1
+  const groupingChars = Math.max(0, Math.floor((digits - 1) / 3))
+  const estimatedChars = digits + groupingChars
+  const extraDigits = Math.max(0, estimatedChars - 4)
+  const computedWidth = LINE_NUMBER_GUTTER_WIDTH + extraDigits * 10
+  return Math.min(Math.max(computedWidth, LINE_NUMBER_GUTTER_WIDTH), MAX_LINE_NUMBER_GUTTER_WIDTH)
 }
 
 type ExtractedTransferPayload = {
@@ -175,6 +191,7 @@ function TabManager(): React.JSX.Element {
 
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const pendingScrollRatioRef = useRef<Record<string, number | null>>({})
   const lineViewportRef = useRef<Record<string, LineViewportState>>({})
   const lineViewportAnimationRef = useRef<number | null>(null)
   const [, forceLineViewportRender] = useState(0)
@@ -190,6 +207,25 @@ function TabManager(): React.JSX.Element {
   const highlightTimeoutRef = useRef<number | null>(null)
   const searchContainerRef = useRef<HTMLDivElement | null>(null)
   const searchObserverRef = useRef<MutationObserver | null>(null)
+
+  const {
+    tabs,
+    activeTabId,
+    activeTab,
+    tabsRef,
+    activeTabIdRef,
+    createNewTab,
+    openFilesFromPaths,
+    openFilesFromContent,
+    switchTab,
+    closeTab,
+    updateTabContent,
+    handleSearchResultSelect,
+    loadMoreContent,
+    jumpToFilePosition,
+    ensureLineVisible
+  } = useTabsController()
+
   const scheduleLineViewportUpdate = useCallback(
     (tabId: string, textarea: HTMLTextAreaElement | null) => {
       if (!textarea) {
@@ -203,8 +239,8 @@ function TabManager(): React.JSX.Element {
         const lineHeight = parseFloat(styles.lineHeight || '20') || 20
         const paddingTop = parseFloat(styles.paddingTop || '0') || 0
         const scrollTop = textarea.scrollTop
-        const firstLine = Math.max(1, Math.floor(scrollTop / lineHeight) + 1)
-        const offset = scrollTop - (firstLine - 1) * lineHeight
+        const firstLine = Math.max(1, Math.floor((scrollTop + paddingTop) / lineHeight) + 1)
+        const offset = (scrollTop + paddingTop) - (firstLine - 1) * lineHeight
         const visibleLines = Math.max(
           1,
           Math.ceil(textarea.clientHeight / lineHeight) + 4
@@ -222,23 +258,6 @@ function TabManager(): React.JSX.Element {
     },
     []
   )
-
-  const {
-    tabs,
-    activeTabId,
-    activeTab,
-    tabsRef,
-    activeTabIdRef,
-    createNewTab,
-    openFilesFromPaths,
-    openFilesFromContent,
-    switchTab,
-    closeTab,
-    updateTabContent,
-    handleSearchResultSelect,
-    loadMoreContent,
-    ensureLineVisible
-  } = useTabsController()
 
   const focusLine = useCallback(
     (tabId: string, line: number, column = 1) => {
@@ -309,8 +328,6 @@ function TabManager(): React.JSX.Element {
     if (!textarea || !overlay) {
       return
     }
-    overlay.style.left = `${LINE_NUMBER_GUTTER_WIDTH}px`
-    overlay.style.right = '0px'
 
     const updateOverlayPosition = (): void => {
       scheduleLineViewportUpdate(activeTabRecord.id, textarea)
@@ -344,6 +361,55 @@ function TabManager(): React.JSX.Element {
       scheduleLineViewportUpdate(activeTab.id, textarea)
     }
   }, [activeTab, scheduleLineViewportUpdate])
+
+  useEffect(() => {
+    const raf = window.requestAnimationFrame(() => {
+      tabs.forEach((tab) => {
+        if (!isFileTab(tab)) {
+          return
+        }
+        const targetRatio = pendingScrollRatioRef.current[tab.id]
+        if (targetRatio == null) {
+          return
+        }
+        const textarea = editorRefs.current[tab.id]
+        if (!textarea) {
+          return
+        }
+        const totalLines = Math.max(
+          tab.lineCount ?? 0,
+          tab.lineWindowStart + Math.max(tab.loadedLineCount - 1, 0),
+          1
+        )
+        if (totalLines <= 0) {
+          pendingScrollRatioRef.current[tab.id] = null
+          return
+        }
+        const startRatio = (tab.lineWindowStart - 1) / totalLines
+        const chunkSpan = tab.loadedLineCount / totalLines
+        if (chunkSpan <= 0) {
+          pendingScrollRatioRef.current[tab.id] = null
+          return
+        }
+        const endRatio = startRatio + chunkSpan
+        if (targetRatio < startRatio || targetRatio > endRatio) {
+          return
+        }
+        const relative = clamp((targetRatio - startRatio) / chunkSpan, 0, 1)
+        const scrollable = textarea.scrollHeight - textarea.clientHeight
+        if (scrollable <= 0) {
+          pendingScrollRatioRef.current[tab.id] = null
+          return
+        }
+        textarea.scrollTop = relative * scrollable
+        pendingScrollRatioRef.current[tab.id] = null
+        scheduleLineViewportUpdate(tab.id, textarea)
+      })
+    })
+    return () => {
+      window.cancelAnimationFrame(raf)
+    }
+  }, [scheduleLineViewportUpdate, tabs])
 
   useEffect(() => {
     return () => {
@@ -461,14 +527,14 @@ function TabManager(): React.JSX.Element {
           return
         }
         const scrollRatio = textarea.scrollTop / scrollable
-        if (scrollRatio > 0.95) {
+        if (scrollRatio > 0.95 && tab.loadedRange.end < tab.size) {
           void loadMoreContent(tab.id, 'forward').catch((error) => {
             if (import.meta.env.DEV) {
               // eslint-disable-next-line no-console
               console.error('[TabManager] window shift forward failed', error)
             }
           })
-        } else if (scrollRatio < 0.05) {
+        } else if (scrollRatio < 0.05 && tab.loadedRange.start > 0) {
           void loadMoreContent(tab.id, 'backward').catch((error) => {
             if (import.meta.env.DEV) {
               // eslint-disable-next-line no-console
@@ -619,6 +685,26 @@ function TabManager(): React.JSX.Element {
           }
         })
       }
+      const lineNumberGutterWidth = estimateLineNumberGutterWidth(tab)
+      const totalLineEstimate = Math.max(windowEndLine, tab.lineCount ?? windowEndLine, 1)
+      const chunkStartRatio =
+        totalLineEstimate > 1 ? (windowStartLine - 1) / totalLineEstimate : 0
+      const chunkEndRatio =
+        totalLineEstimate > 1 ? Math.min(windowEndLine / totalLineEstimate, 1) : 1
+      const handleWindowSeek = (nextRatio: number) => {
+        if (disableWindowShift) {
+          return
+        }
+        const clamped = clamp(nextRatio, 0, 1)
+        pendingScrollRatioRef.current[tab.id] = clamped
+        void jumpToFilePosition(tab.id, clamped).catch((error) => {
+          if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.error('[TabManager] window jump failed', error)
+          }
+          pendingScrollRatioRef.current[tab.id] = null
+        })
+      }
       return (
         <div className="relative flex h-full flex-col">
           {tab.isWindowed ? (
@@ -691,11 +777,12 @@ function TabManager(): React.JSX.Element {
               </div>
             </div>
           ) : null}
-          <div className="flex h-full">
+          <div className="relative flex h-full">
             <div className="relative h-full shrink-0 overflow-hidden border-r border-slate-200 bg-slate-100/80">
               <div
-                className="w-14 px-3 py-0 text-right font-mono text-xs text-slate-400 will-change-transform"
+                className="px-3 py-0 text-right font-mono text-xs text-slate-400 will-change-transform"
                 style={{
+                  width: `${lineNumberGutterWidth}px`,
                   transform: `translateY(-${viewport.offset}px)`,
                   paddingTop: `${viewport.paddingTop}px`
                 }}
@@ -730,13 +817,21 @@ function TabManager(): React.JSX.Element {
               }`}
               spellCheck={false}
             />
+            {tab.isWindowed ? (
+              <WindowedScrollBar
+                startRatio={chunkStartRatio}
+                endRatio={chunkEndRatio}
+                disabled={disableWindowShift}
+                onSeek={handleWindowSeek}
+              />
+            ) : null}
           </div>
           <div
             ref={(el) => {
               highlightRefs.current[tab.id] = el
             }}
             className="pointer-events-none absolute right-0 bg-amber-200/60 opacity-0 transition-opacity"
-            style={{ left: `${LINE_NUMBER_GUTTER_WIDTH}px` }}
+            style={{ left: `${lineNumberGutterWidth}px` }}
           />
         </div>
       )
