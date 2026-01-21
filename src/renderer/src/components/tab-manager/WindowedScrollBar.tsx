@@ -1,3 +1,4 @@
+import type React from 'react'
 import { useCallback, useRef } from 'react'
 import { clamp } from './helpers'
 
@@ -73,7 +74,9 @@ export function WindowedScrollBar({
 
   const safeStart = clamp(Number.isFinite(startRatio) ? startRatio : 0, 0, 1)
   const safeEnd = clamp(Number.isFinite(endRatio) ? endRatio : safeStart, safeStart, 1)
-  const thumbRange = Math.max((safeEnd - safeStart) * 100, MIN_THUMB_PERCENT)
+  const rawRange = Math.max((safeEnd - safeStart) * 100, MIN_THUMB_PERCENT)
+  const maxRange = Math.max(100 - safeStart * 100, MIN_THUMB_PERCENT)
+  const thumbRange = Math.min(rawRange, maxRange)
 
   return (
     <div
@@ -84,7 +87,7 @@ export function WindowedScrollBar({
       aria-valuenow={Math.round(safeStart * 100)}
       aria-label="File position"
       tabIndex={-1}
-      className={`pointer-events-auto absolute inset-y-4 right-2 flex w-3 cursor-pointer select-none rounded-full bg-slate-200/70 transition hover:bg-slate-300/90 ${
+      className={`pointer-events-auto absolute inset-y-0 right-2 flex w-3 cursor-pointer select-none rounded-full bg-slate-200/70 transition hover:bg-slate-300/90 ${
         disabled ? 'opacity-40' : 'opacity-80'
       }`}
       onPointerDown={handlePointerDown}

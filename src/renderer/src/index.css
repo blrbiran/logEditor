@@ -23,20 +23,15 @@ body {
 }
 
 .editor-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: #cbd5f5 #e2e8f0;
+  scrollbar-width: none;
 }
 
 .editor-scrollbar::-webkit-scrollbar {
-  width: 10px;
+  width: 0;
+  height: 0;
 }
 
-.editor-scrollbar::-webkit-scrollbar-track {
-  background: #e2e8f0;
-}
-
+.editor-scrollbar::-webkit-scrollbar-track,
 .editor-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #93c5fd;
-  border-radius: 9999px;
-  border: 2px solid #e2e8f0;
+  background: transparent;
 }
