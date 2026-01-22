@@ -760,11 +760,7 @@ function TabManager(): React.JSX.Element {
         tab.size > 0 ? Math.min(1, tab.loadedRange.end / tab.size) : 1
       const scrollMetrics = standardScrollMetricsRef.current[tab.id]
       const standardScrollStart = scrollMetrics?.scrollRatio ?? 0
-      const standardScrollEnd = clamp(
-        standardScrollStart + (scrollMetrics?.viewportRatio ?? 1),
-        standardScrollStart,
-        1
-      )
+      const standardScrollEnd = standardScrollStart + (scrollMetrics?.viewportRatio ?? 1)
       const standardScrollDisabled = scrollMetrics ? !scrollMetrics.canScroll : false
       const handleWindowSeek = (nextRatio: number) => {
         if (disableWindowShift) {

@@ -10,6 +10,7 @@ type WindowedScrollBarProps = {
 }
 
 const MIN_THUMB_PERCENT = 4
+const MIN_THUMB_RATIO = MIN_THUMB_PERCENT / 100
 
 export function WindowedScrollBar({
   startRatio,
@@ -73,10 +74,12 @@ export function WindowedScrollBar({
   }, [])
 
   const safeStart = clamp(Number.isFinite(startRatio) ? startRatio : 0, 0, 1)
-  const safeEnd = clamp(Number.isFinite(endRatio) ? endRatio : safeStart, safeStart, 1)
-  const rawRange = Math.max((safeEnd - safeStart) * 100, MIN_THUMB_PERCENT)
-  const maxRange = Math.max(100 - safeStart * 100, MIN_THUMB_PERCENT)
-  const thumbRange = Math.min(rawRange, maxRange)
+  const computedEnd = Number.isFinite(endRatio) ? endRatio : safeStart
+  const rawRangeRatio = Math.max(computedEnd - safeStart, 0)
+  const desiredRangeRatio = Math.min(1, Math.max(rawRangeRatio, MIN_THUMB_RATIO))
+  const maxStartRatio = Math.max(0, 1 - desiredRangeRatio)
+  const renderStartRatio = Math.min(safeStart, maxStartRatio)
+  const thumbRatio = desiredRangeRatio
 
   return (
     <div
@@ -84,7 +87,7 @@ export function WindowedScrollBar({
       role="slider"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={Math.round(safeStart * 100)}
+      aria-valuenow={Math.round(renderStartRatio * 100)}
       aria-label="File position"
       tabIndex={-1}
       className={`pointer-events-auto absolute inset-y-0 right-2 flex w-3 cursor-pointer select-none rounded-full bg-slate-200/70 transition hover:bg-slate-300/90 ${
@@ -98,8 +101,8 @@ export function WindowedScrollBar({
       <div
         className="absolute left-1/2 w-2 -translate-x-1/2 rounded-full bg-sky-500 shadow-sm"
         style={{
-          top: `${safeStart * 100}%`,
-          height: `${thumbRange}%`
+          top: `${renderStartRatio * 100}%`,
+          height: `${thumbRatio * 100}%`
         }}
       />
     </div>
