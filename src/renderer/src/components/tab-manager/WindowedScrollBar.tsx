@@ -6,6 +6,8 @@ type WindowedScrollBarProps = {
   startRatio: number
   endRatio: number
   disabled?: boolean
+  offsetTop?: number
+  offsetBottom?: number
   onSeek(ratio: number): void
 }
 
@@ -15,6 +17,8 @@ export function WindowedScrollBar({
   startRatio,
   endRatio,
   disabled = false,
+  offsetTop = 0,
+  offsetBottom = 0,
   onSeek
 }: WindowedScrollBarProps): React.JSX.Element {
   const trackRef = useRef<HTMLDivElement | null>(null)
@@ -77,6 +81,8 @@ export function WindowedScrollBar({
   const rawRange = Math.max((safeEnd - safeStart) * 100, MIN_THUMB_PERCENT)
   const maxRange = Math.max(100 - safeStart * 100, MIN_THUMB_PERCENT)
   const thumbRange = Math.min(rawRange, maxRange)
+  const topInset = Number.isFinite(offsetTop) ? -offsetTop : 0
+  const bottomInset = Number.isFinite(offsetBottom) ? -offsetBottom : 0
 
   return (
     <div
@@ -87,9 +93,13 @@ export function WindowedScrollBar({
       aria-valuenow={Math.round(safeStart * 100)}
       aria-label="File position"
       tabIndex={-1}
-      className={`pointer-events-auto absolute inset-y-0 right-2 flex w-3 cursor-pointer select-none rounded-full bg-slate-200/70 transition hover:bg-slate-300/90 ${
+      className={`pointer-events-auto absolute right-2 flex w-3 cursor-pointer select-none rounded-full bg-slate-200/70 transition hover:bg-slate-300/90 ${
         disabled ? 'opacity-40' : 'opacity-80'
       }`}
+      style={{
+        top: `${topInset}px`,
+        bottom: `${bottomInset}px`
+      }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}

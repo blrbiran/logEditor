@@ -170,6 +170,11 @@ function TabManager(): React.JSX.Element {
     canScroll: boolean
   }
 
+  type ScrollbarOffsets = {
+    top: number
+    bottom: number
+  }
+
   const resolveLineBounds = (value: string, line: number): { start: number; end: number } => {
     const target = Math.max(1, line)
     let startIndex = 0
@@ -197,6 +202,9 @@ function TabManager(): React.JSX.Element {
   }
 
   const editorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
+  const contentContainerRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const fileRootRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const scrollbarOffsetsRef = useRef<Record<string, ScrollbarOffsets>>({})
   const highlightRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const pendingScrollRatioRef = useRef<Record<string, number | null>>({})
   const lineViewportRef = useRef<Record<string, LineViewportState>>({})
@@ -247,6 +255,20 @@ function TabManager(): React.JSX.Element {
   }, [windowControlsEnabled])
   const handleWindowControlsToggle = useCallback(() => {
     setWindowControlsEnabled((prev) => !prev)
+  }, [])
+  const updateScrollbarOffsets = useCallback((tabId: string) => {
+    const root = fileRootRefs.current[tabId]
+    const container = contentContainerRefs.current[tabId]
+    if (!root || !container) {
+      delete scrollbarOffsetsRef.current[tabId]
+      return
+    }
+    const rootRect = root.getBoundingClientRect()
+    const containerRect = container.getBoundingClientRect()
+    scrollbarOffsetsRef.current[tabId] = {
+      top: Math.max(0, containerRect.top - rootRect.top),
+      bottom: Math.max(0, rootRect.bottom - containerRect.bottom)
+    }
   }, [])
 
   const {
@@ -314,11 +336,12 @@ function TabManager(): React.JSX.Element {
           paddingTop
         }
         updateStandardScrollMetrics(tabId, textarea)
+        updateScrollbarOffsets(tabId)
         forceLineViewportRender((value) => value + 1)
         lineViewportAnimationRef.current = null
       })
     },
-    [updateStandardScrollMetrics]
+    [updateScrollbarOffsets, updateStandardScrollMetrics]
   )
 
   const focusLine = useCallback(
@@ -355,7 +378,8 @@ function TabManager(): React.JSX.Element {
       scheduleLineViewportUpdate(tabId, textarea)
 
       const paintHighlight = (): void => {
-        const top = paddingTop + (targetLine - 1) * lineHeight - textarea.scrollTop
+        const headerOffset = scrollbarOffsetsRef.current[tabId]?.top ?? 0
+        const top = headerOffset + paddingTop + (targetLine - 1) * lineHeight - textarea.scrollTop
         overlay.style.top = `${Math.max(top, 0)}px`
         overlay.style.height = `${lineHeight}px`
         overlay.style.opacity = '1'
@@ -401,7 +425,8 @@ function TabManager(): React.JSX.Element {
       const styles = getComputedStyle(textarea)
       const lineHeight = parseFloat(styles.lineHeight || '20')
       const paddingTop = parseFloat(styles.paddingTop || '0')
-      const top = paddingTop + (highlight.line - 1) * lineHeight - textarea.scrollTop
+      const headerOffset = scrollbarOffsetsRef.current[activeTabRecord.id]?.top ?? 0
+      const top = headerOffset + paddingTop + (highlight.line - 1) * lineHeight - textarea.scrollTop
       overlay.style.top = `${Math.max(top, 0)}px`
       overlay.style.height = `${lineHeight}px`
     }
@@ -413,6 +438,19 @@ function TabManager(): React.JSX.Element {
       textarea.removeEventListener('scroll', updateOverlayPosition)
     }
   }, [activeTabId, activeTabIdRef, tabsRef, scheduleLineViewportUpdate])
+  useEffect(() => {
+    const handleResize = () => {
+      tabsRef.current.forEach((tab) => {
+        if (isFileTab(tab)) {
+          updateScrollbarOffsets(tab.id)
+        }
+      })
+    }
+    window.addEventListener('resize', handleResize)
+    return () => {
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [tabsRef, updateScrollbarOffsets])
 
   useEffect(() => {
     if (!activeTab || !isFileTab(activeTab)) {
@@ -422,7 +460,8 @@ function TabManager(): React.JSX.Element {
     if (textarea) {
       scheduleLineViewportUpdate(activeTab.id, textarea)
     }
-  }, [activeTab, scheduleLineViewportUpdate])
+    updateScrollbarOffsets(activeTab.id)
+  }, [activeTab, scheduleLineViewportUpdate, updateScrollbarOffsets, windowControlsEnabled])
 
   useEffect(() => {
     const raf = window.requestAnimationFrame(() => {
@@ -747,18 +786,25 @@ function TabManager(): React.JSX.Element {
       const viewport = lineViewportRef.current[tab.id] ?? defaultLineViewport
       const totalLines = Math.max(tab.loadedLineCount, 1)
       const safeFirstLine = Math.min(viewport.firstLine, totalLines)
-      const remaining = Math.max(1, totalLines - safeFirstLine + 1)
-      const lineRenderCount = Math.max(
-        1,
-        Math.min(viewport.visibleLines, remaining, MAX_RENDERED_LINE_NUMBERS)
-      )
-      const lineNumbers = Array.from({ length: lineRenderCount }, (_, index) => safeFirstLine + index)
+      const chunkRemaining = Math.max(1, totalLines - safeFirstLine + 1)
       const windowStartLine = Math.max(1, tab.lineWindowStart)
       const windowEndLine = windowStartLine + Math.max(0, tab.loadedLineCount - 1)
-      const totalKnownLines = Math.max(1, tab.lineCount)
+      const knownLineCount = tab.lineCount > 0 ? tab.lineCount : 0
+      const globalFirstLine = windowStartLine + safeFirstLine - 1
+      const fileRemaining =
+        knownLineCount > 0 ? Math.max(1, knownLineCount - globalFirstLine + 1) : chunkRemaining
+      const effectiveRemaining = Math.max(1, Math.min(chunkRemaining, fileRemaining))
+      const lineRenderCount = Math.max(
+        1,
+        Math.min(viewport.visibleLines, effectiveRemaining, MAX_RENDERED_LINE_NUMBERS)
+      )
+      const lineNumbers = Array.from({ length: lineRenderCount }, (_, index) => safeFirstLine + index)
       const displayLineNumbers = lineNumbers.map((lineNumber) => {
         const globalLineNumber = windowStartLine + lineNumber - 1
-        return Math.max(1, Math.min(globalLineNumber, totalKnownLines))
+        if (knownLineCount > 0) {
+          return Math.max(1, Math.min(globalLineNumber, knownLineCount))
+        }
+        return Math.max(1, globalLineNumber)
       })
       const canShiftBackward = tab.loadedRange.start > 0
       const canShiftForward = tab.loadedRange.end < tab.size
@@ -776,6 +822,9 @@ function TabManager(): React.JSX.Element {
         tab.size > 0 ? Math.max(0, tab.loadedRange.start / tab.size) : 0
       const chunkEndRatio =
         tab.size > 0 ? Math.min(1, tab.loadedRange.end / tab.size) : 1
+      const scrollbarOffsets = scrollbarOffsetsRef.current[tab.id]
+      const scrollbarTopOffset = scrollbarOffsets?.top ?? 0
+      const scrollbarBottomOffset = scrollbarOffsets?.bottom ?? 0
       const scrollMetrics = standardScrollMetricsRef.current[tab.id]
       const standardScrollStart = scrollMetrics?.scrollRatio ?? 0
       const standardScrollEnd = clamp(
@@ -799,7 +848,18 @@ function TabManager(): React.JSX.Element {
         })
       }
       return (
-        <div className="relative flex h-full min-h-0 flex-col">
+        <div
+          ref={(element) => {
+            if (!element) {
+              delete fileRootRefs.current[tab.id]
+              delete scrollbarOffsetsRef.current[tab.id]
+              return
+            }
+            fileRootRefs.current[tab.id] = element
+            updateScrollbarOffsets(tab.id)
+          }}
+          className="relative flex h-full min-h-0 flex-col"
+        >
           {tab.isWindowed ? (
             <div className="flex flex-col gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2 text-xs text-sky-900">
               <div className="flex w-full flex-wrap items-center gap-3">
@@ -895,7 +955,18 @@ function TabManager(): React.JSX.Element {
               </div>
             </div>
           ) : null}
-          <div className="relative flex flex-1 min-h-0">
+          <div
+            ref={(element) => {
+              if (!element) {
+                delete contentContainerRefs.current[tab.id]
+                delete scrollbarOffsetsRef.current[tab.id]
+                return
+              }
+              contentContainerRefs.current[tab.id] = element
+              updateScrollbarOffsets(tab.id)
+            }}
+            className="relative flex flex-1 min-h-0"
+          >
             <div className="relative h-full shrink-0 overflow-hidden border-r border-slate-200 bg-slate-100/80">
               <div
                 className="px-3 py-0 text-right font-mono text-xs text-slate-400 will-change-transform"
@@ -941,6 +1012,8 @@ function TabManager(): React.JSX.Element {
                 startRatio={chunkStartRatio}
                 endRatio={chunkEndRatio}
                 disabled={disableWindowShift}
+                offsetTop={scrollbarTopOffset}
+                offsetBottom={scrollbarBottomOffset}
                 onSeek={handleWindowSeek}
               />
             ) : (
@@ -948,6 +1021,8 @@ function TabManager(): React.JSX.Element {
                 startRatio={standardScrollStart}
                 endRatio={standardScrollEnd}
                 disabled={standardScrollDisabled}
+                offsetTop={scrollbarTopOffset}
+                offsetBottom={scrollbarBottomOffset}
                 onSeek={(ratio) => handleStandardSeek(tab.id, ratio)}
               />
             )}
