@@ -77,8 +77,8 @@ export function WindowedScrollBar({
   const computedEnd = Number.isFinite(endRatio) ? endRatio : safeStart
   const rawRangeRatio = Math.max(computedEnd - safeStart, 0)
   const desiredRangeRatio = Math.min(1, Math.max(rawRangeRatio, MIN_THUMB_RATIO))
-  const maxStartRatio = Math.max(0, 1 - desiredRangeRatio)
-  const renderStartRatio = Math.min(safeStart, maxStartRatio)
+  const remainingTrackRatio = Math.max(0, 1 - desiredRangeRatio)
+  const renderStartRatio = remainingTrackRatio > 0 ? clamp(safeStart, 0, 1) * remainingTrackRatio : 0
   const thumbRatio = desiredRangeRatio
 
   return (
