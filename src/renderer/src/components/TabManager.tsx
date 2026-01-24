@@ -721,7 +721,7 @@ function TabManager(): React.JSX.Element {
       const totalBytes = tab.size > 0 ? tab.size : loadedBytes
       const viewport = lineViewportRef.current[tab.id] ?? defaultLineViewport
       const totalLines = Math.max(tab.loadedLineCount, 1)
-      const safeFirstLine = Math.min(viewport.firstLine, totalLines)
+      const safeFirstLine = Math.min(Math.max(1, viewport.firstLine), totalLines)
       const chunkRemaining = Math.max(1, totalLines - safeFirstLine + 1)
       const windowStartLine = Math.max(1, tab.lineWindowStart)
       const windowEndLine = windowStartLine + Math.max(0, tab.loadedLineCount - 1)

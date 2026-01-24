@@ -29,35 +29,65 @@ const DEFAULT_CHUNK_SIZE = 512 * 1024
 const textDecoder = new TextDecoder('utf-8')
 const lineCache = new Map<string, Map<number, number>>()
 
-const countLinesInText = (value: string): number => {
+type LineBreakStats = {
+  breaks: number
+  endsWithBreak: boolean
+}
+
+const getLineBreakStats = (value: string): LineBreakStats => {
+  let breaks = 0
+  let endsWithBreak = false
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 10) {
+      breaks += 1
+      endsWithBreak = true
+    } else {
+      endsWithBreak = false
+    }
+  }
+  return { breaks, endsWithBreak }
+}
+
+const countLinesInText = (value: string, stats?: LineBreakStats): number => {
   if (!value.length) {
     return 1
   }
-  let count = 1
-  for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) === 10) {
-      count += 1
-    }
+  const metrics = stats ?? getLineBreakStats(value)
+  if (metrics.breaks === 0) {
+    return 1
   }
-  return count
+  const total = metrics.endsWithBreak ? Math.max(1, metrics.breaks) : metrics.breaks + 1
+  return total
 }
 
 const countLinesInFile = async (filePath: string): Promise<number> => {
   return await new Promise((resolve, reject) => {
     let count = 0
+    let endsWithBreak = false
+    let sawData = false
     const stream = createReadStream(filePath, {
       encoding: 'utf-8',
       highWaterMark: 256 * 1024
     })
     stream.on('data', (chunk: string) => {
+      if (!chunk.length) {
+        return
+      }
+      sawData = true
       for (let index = 0; index < chunk.length; index += 1) {
         if (chunk.charCodeAt(index) === 10) {
           count += 1
         }
       }
+      endsWithBreak = chunk.charCodeAt(chunk.length - 1) === 10
     })
     stream.on('end', () => {
-      resolve(count + 1)
+      if (!sawData) {
+        resolve(1)
+        return
+      }
+      const total = endsWithBreak ? Math.max(1, count) : count + 1
+      resolve(total)
     })
     stream.on('error', (error) => {
       reject(error)
@@ -300,8 +330,9 @@ const readFileRange = async ({
 
     const nextEnd = safeStart + bytesRead
     const startLine = await getLineNumberForOffset(filePath, safeStart)
-    const lineCount = countLinesInText(content)
-    getOrInitLineCache(filePath).set(nextEnd, startLine + lineCount)
+    const chunkStats = getLineBreakStats(content)
+    const lineCount = countLinesInText(content, chunkStats)
+    getOrInitLineCache(filePath).set(nextEnd, startLine + chunkStats.breaks)
     return {
       filePath,
       start: safeStart,

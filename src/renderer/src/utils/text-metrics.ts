@@ -3,13 +3,16 @@ export const countLines = (value: string): number => {
     return 1
   }
 
-  let count = 1
+  let breaks = 0
   for (let index = 0; index < value.length; index += 1) {
     if (value.charCodeAt(index) === 10) {
-      count += 1
+      breaks += 1
     }
   }
-  return count
+
+  const endsWithBreak = value.charCodeAt(value.length - 1) === 10
+  const total = endsWithBreak ? breaks : breaks + 1
+  return Math.max(1, total)
 }
 
 export const countLinesForAppend = (value: string, previousEndedWithLineBreak: boolean): number => {

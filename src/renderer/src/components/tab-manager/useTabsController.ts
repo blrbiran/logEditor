@@ -59,16 +59,25 @@ const debugLog = (...args: unknown[]): void => {
 }
 
 const buildWindowedTabState = (tab: FileTab, range: FileRangePayload): FileTab => {
-  const lineCount = range.lineCount ?? countLines(range.content)
-  const startLine = range.startLine ?? tab.lineWindowStart
+  const chunkLineCount = range.lineCount ?? countLines(range.content)
+  const startLine = Math.max(1, range.startLine ?? tab.lineWindowStart)
+  const windowEndLine = startLine + Math.max(0, chunkLineCount - 1)
+  const previousTotal = tab.lineCount ?? 0
+  const reachedFileEnd = !range.hasMore && range.end >= range.totalSize
+  const hasAuthoritativeTotal = previousTotal > tab.loadedLineCount
+  const shouldLockTotal = hasAuthoritativeTotal && !reachedFileEnd
+  const nextTotalLineCount = shouldLockTotal
+    ? previousTotal
+    : Math.max(previousTotal, windowEndLine)
   const windowed = range.start > 0 || range.end < range.totalSize
   return {
     ...tab,
     content: range.content,
     size: range.totalSize,
     loadedRange: { start: range.start, end: range.end },
-    loadedLineCount: lineCount,
+    loadedLineCount: chunkLineCount,
     lineWindowStart: startLine,
+    lineCount: nextTotalLineCount,
     isTruncated: windowed || tab.isTruncated,
     isWindowed: windowed,
     isLoadingMore: false,
