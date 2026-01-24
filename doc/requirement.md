@@ -1,36 +1,42 @@
 # LogEditor Requirement
 
-LogEditor 是一款基于 Electron + React + Tailwind CSS + TypeScript + electron-vite 的桌面日志查看与编辑工具。本文档以需求说明的角度描述架构、模块职责、进程间协议、搜索算法与 UI 约束。遵循此文档即可由 LLM 或人工复刻完整项目。
+LogEditor 是一款基于 Electron + React + Tailwind CSS + TypeScript + electron-vite 的桌面日志查看与编辑工具，具备多标签、跨标签搜索与大文件滑窗编辑能力。本文档同步到 `main` 分支 commit `6dd95a6`，覆盖了提交 `4140507` 至 `6dd95a6` 引入的“大文件窗口化 + 自定义滚动条”系列改动。遵循此文档即可由 LLM 或人工复刻完整项目。
 
 ---
 
 ## 1. 项目目标与范围
 
-- 面向日志调试与分析场景，提供多标签文本编辑、跨标签搜索、快速行定位与高亮提示。
-- 桌面端原生体验：窗口管理遵循平台规范，并支持 macOS / Windows / Linux。
-- 强调可维护的模块划分：主进程负责窗口与文件 I/O，预加载层暴露受控 API，渲染端实现业务 UI 与状态。
+- 面向日志调试与分析，提供多标签文本编辑、跨标签/嵌套搜索、快速行定位与高亮提示。
+- 针对 >2 MB 的日志启用滑窗模式：渲染端仅保留单个窗口、支持字节/行精准跳转，并允许在窗口中原地保存。
+- 桌面端原生体验：窗口管理遵循平台规范，支持 macOS / Windows / Linux。
+- 强调可维护的模块化：主进程负责窗口、文件 I/O、搜索；预加载层暴露受控 API；渲染端处理 UI 状态。
+- 文档与代码双向约束：`doc/memory-optimization-notes.md` 与 `doc/large-file-windowing.md` 记录性能与滑窗契约。
 
 ---
 
 ## 2. 技术栈与版本要求
 
 - Electron `^38.1.2`
-- react + react-dom `^19.1.1`
-- TypeScript `^5.9.2`，统一用于 main / preload / renderer
+- React + React DOM `^19.1.1`
+- TypeScript `^5.9.2`（main / preload / renderer 统一）
 - electron-vite `^4.0.1`（HMR、双入口构建）
-- Tailwind CSS `^4.1.16`，PostCSS 插件 `@tailwindcss/postcss` + `autoprefixer`
+- Tailwind CSS `^4.1.16` + `@tailwindcss/postcss` + `autoprefixer`
 - ESLint `^9.36.0` + Prettier `^3.6.2`（继承 `@electron-toolkit` 规则）
-- electron-builder `^25.1.8` 用于打包
+- electron-builder `^25.1.8`（打包）
+- @electron-toolkit 组件：`utils`（快捷键/环境辅助）、`preload`（Electron API polyfill）
+- electron-updater `^6.3.9`（预留自动更新能力，尚未在 main 进程启用）
 
 ---
 
 ## 3. 运行脚本
 
-- `npm run dev`：启用 electron-vite 开发模式，主窗口与搜索窗口具备 HMR。
-- `npm run build`：执行 Node/Web 双 tsconfig 类型检查后打包 main、preload、renderer。
-- `npm start`：使用 `electron-vite preview` 运行构建产物。
-- `npm run typecheck[:node|:web]`：独立类型检查。
-- `npm run build:{mac|win|linux}`：构建 + 平台打包。
+- `npm run dev`：electron-vite 开发模式，主窗口/搜索窗口支持 HMR。
+- `npm run build`：先运行 `npm run typecheck` 再执行 electron-vite build。
+- `npm run start`：`electron-vite preview` 运行构建产物。
+- `npm run typecheck[:node|:web]`：针对两个 tsconfig 的类型检查。
+- `npm run build:{mac|win|linux}`：构建后交给 electron-builder 生成平台包。
+- `npm run build:unpack`：构建并输出未压缩的 Electron 目录，用于调试 installer。
+- `npm run format` / `npm run lint`：Prettier + ESLint。
 
 ---
 
@@ -39,53 +45,55 @@ LogEditor 是一款基于 Electron + React + Tailwind CSS + TypeScript + electro
 ```
 src/
 ├── common/
-│   └── ipc.ts               # 共享的 IPC 契约、类型别名、预加载 API 定义
+│   └── ipc.ts                  # 共享类型、IPC 契约
 ├── main/
-│   ├── index.ts             # 主进程入口，仅负责生命周期 orchestrate
-│   ├── window-manager.ts    # 主/搜索窗口创建、聚焦与上下文广播
-│   ├── menu.ts              # 应用菜单模板与命令触发
-│   ├── search-service.ts    # 搜索引擎、标签快照缓存、结果集管理
-│   └── ipc.ts               # IPC 注册，桥接窗口管理与搜索服务
+│   ├── index.ts                # Electron 生命周期 orchestrator
+│   ├── window-manager.ts       # 主/搜索窗口管理
+│   ├── menu.ts                 # 菜单模板
+│   ├── search-service.ts       # 搜索/缓存/磁盘流查找
+│   └── ipc.ts                  # 文件 I/O、IPC handler、滑窗编辑
 ├── preload/
-│   ├── index.ts             # contextBridge，封装受控 API
-│   └── index.d.ts           # 运行时全局声明，引用共享 LogEditorApi 类型
+│   ├── index.ts                # contextBridge + 统一 API
+│   └── index.d.ts              # 全局声明
 └── renderer/
-    ├── index.html           # 主窗口 HTML
-    ├── search.html          # 搜索窗口 HTML
+    ├── index.html              # 主窗口入口
+    ├── search.html             # 搜索窗口入口
     └── src/
-        ├── main.tsx         # ReactDOM 入口
-        ├── App.tsx          # 根组件（挂载 TabManager）
-        ├── index.css        # 主窗口全局样式（Tailwind 指令 + scrollbar 定制）
-        ├── env.d.ts         # 渲染进程类型 re-export（来自 common/ipc.ts）
-        ├── search.ts        # 搜索窗口逻辑
-        ├── search.css       # 搜索窗口样式
+        ├── main.tsx / App.tsx
+        ├── index.css           # Tailwind + 基础样式
+        ├── search.ts / search.css
+        ├── assets/             # SVG、基础 CSS
+        ├── utils/
+        │   └── text-metrics.ts # 行数计算工具
         └── components/
-            ├── TabManager.tsx         # 主 UI 容器，组合 hooks 与子组件
+            ├── TabManager.tsx
+            ├── Versions.tsx
             └── tab-manager/
-                ├── useTabsController.ts # 标签状态、菜单事件、IPC 同步 hook
-                ├── SearchResultsPanel.tsx # 搜索结果列表与摘要
-                ├── helpers.ts           # ID/文件名/数值工具函数
-                ├── search-utils.ts      # 搜索标签标题、片段分组、高亮工具
-                ├── tab-types.ts         # Tab 类型守卫与常量
-                └── constants.ts         # Tab 相关常量（行号 gutter 等）
+                ├── useTabsController.ts
+                ├── SearchResultsPanel.tsx
+                ├── WindowedScrollBar.tsx
+                ├── constants.ts / helpers.ts / search-utils.ts / tab-types.ts
+doc/
+├── requirement.md
+├── memory-optimization-notes.md
+└── large-file-windowing.md     # 滑窗实现细节
+tests/
+├── windowed-line-tester.mjs    # 行号/窗口边界验证脚本
+└── generated_*                 # 大文件样例
 ```
 
-辅助配置：
-
-- `electron.vite.config.ts`：为 main/preload 应用 `externalizeDepsPlugin`，renderer 设置 React 插件、Tailwind PostCSS 流程，并定义 `main`/`search` 双 HTML 入口；配置别名 `@renderer -> src/renderer/src`。
-- `tailwind.config.js`：扫描 `./src/**/*.{js,ts,jsx,tsx}` 生成原子类。
-- `resources/icon.png`：桌面应用图标。
-- `tsconfig.node.json` 与 `tsconfig.web.json`：分别服务 Node/Electron 环境与浏览器环境。
+辅助配置：`electron.vite.config.ts`、`tailwind.config.js`、`tsconfig.*`、`electron-builder.yml`、`resources/icon.png`。
 
 ---
 
 ## 5. 架构概览
 
-1. **共享契约 (`src/common/ipc.ts`)**：集中声明 `SearchRequest`、`SearchResponsePayload`、`ActiveContext`、`LogEditorApi` 等类型，供 main / preload / renderer 共用，确保 IPC 协议与桥接 API 一致。
-2. **主进程 (Node/Electron 环境)**：通过 `window-manager` 管理窗口生命周期，`menu` 负责菜单模板，`search-service` 提供搜索引擎与缓存，`ipc` 注册渠道；`index.ts` 作为 orchestrator。
-3. **预加载层 (contextBridge)**：在 `index.ts` 中暴露受控的 `LogEditorApi`，复用共享类型并在 `index.d.ts` 中声明 window 全局。
-4. **渲染进程（React）**：`TabManager` 组合 `useTabsController` 与 `SearchResultsPanel` 等子模块，完成标签状态管理、编辑器渲染与搜索结果展示。
-5. **独立搜索窗口**：共享预加载 API，使用轻量 DOM 脚本发起搜索请求并回传结果。
+1. **共享契约 (`src/common/ipc.ts`)**：集中声明 `SearchRequest`、`SearchResponsePayload`、`OpenedFile`、`FileRangePayload`、`WindowEditPayload`、`ActiveContext` 等，保证 main/preload/renderer 一致。
+2. **主进程**：`index.ts` 驱动生命周期，`window-manager` 管理窗口，`menu` 注入菜单行为，`ipc.ts` 实现文件读写/滑窗编辑/保存，`search-service` 负责搜索和结果缓存。
+3. **预加载层**：通过 `contextBridge` 暴露 `window.api`，对外提供受控的 `openFileDialog` / `readFileRange` / `applyWindowEdit` 等方法，并封装订阅工具。
+4. **渲染进程（React）**：`TabManager` 组合 `useTabsController`、`SearchResultsPanel`、`WindowedScrollBar`，实现多标签、拖拽打开、滑窗滚动、搜索结果跳转等 UI。
+5. **搜索窗口**：独立 `search.html + search.ts`，收集查询条件，调用主窗口 API 并通过 IPC 回传结果。
+6. **文档约束**：`doc/memory-optimization-notes.md` 和 `doc/large-file-windowing.md` 详细描述滑窗动机、指标与算法，应与代码保持一致。
 
 ---
 
@@ -93,128 +101,104 @@ src/
 
 ### 6.1 入口 orchestrator（`src/main/index.ts`）
 
-- 持有全局 `activeContext` 状态（记录当前聚焦的欢迎/文件/搜索页）。
-- 实例化 `searchService = createSearchService()` 与 `windowManager = createWindowManager({ getActiveContext })`。
-- 在 `app.whenReady()` 中：
-  - 调用 `electronApp.setAppUserModelId('com.electron')`，满足 Windows 要求。
-  - 通过 `optimizer.watchWindowShortcuts` 统一快捷键行为（开发环境允许 F12，生产阻止强制刷新）。
-  - `windowManager.createMainWindow()` 启动主窗口。
-  - `registerIpcHandlers({ windowManager, searchService, setActiveContext })` 注册 IPC。
-  - `buildApplicationMenu({ sendToRenderer, openSearchWindow })` 构建菜单。
-- 监听 `app.on('activate')`：若窗口全部关闭（macOS）重新创建主窗口并重建菜单。
-- 监听 `app.on('window-all-closed')`：非 macOS 平台直接退出。
-- `setActiveContext` 同步更新 `activeContext` 并委托 `windowManager.sendSearchContext` 将上下文广播到搜索窗口。
+- 维护 `activeContext`（welcome/file/search），并在更新时调用 `windowManager.sendSearchContext` 同步到搜索窗口。
+- `app.whenReady()` 中：
+  - `electronApp.setAppUserModelId('com.electron')`（Windows 要求）。
+  - `app.on('browser-window-created', optimizer.watchWindowShortcuts)`。
+  - 实例化 `windowManager.createMainWindow()`。
+  - `registerIpcHandlers({ windowManager, searchService, setActiveContext })`。
+  - `buildApplicationMenu({ sendToRenderer, openSearchWindow })`。
+- `app.on('activate')`：macOS 无窗口时重建主窗+菜单。
+- `app.on('window-all-closed')`：非 macOS 平台直接退出。
 
 ### 6.2 窗口管理器（`src/main/window-manager.ts`）
 
-- 维护 `mainWindow` 与 `searchWindow` 引用，暴露：
-  - `createMainWindow()`：创建 900×670 主窗口，设置 `autoHideMenuBar`、预加载脚本 `../preload/index.js`，阻止 `window.open`，按环境加载 URL 或本地 HTML。
-  - `openSearchWindow()`：在主窗口存在时创建 420×528 搜索子窗，加载 `search.html`，并在 `did-finish-load` 后推送当前 `ActiveContext`。
-  - `sendToRenderer(channel, payload)`：向主窗口广播事件。
-  - `focusMainWindow()`：恢复/聚焦主窗口。
-  - `sendSearchContext(context)`：若搜索窗口存在则推送上下文。
-  - `getMainWindow()` / `ensureMainWindow()`：过滤掉搜索窗口，返回主窗口实例。
+- 追踪 `mainWindow`/`searchWindow` 并暴露：
+  - `createMainWindow()`：900×670，`preload` 指向 `../preload/index.js`，阻止 `window.open`（交给 `shell.openExternal`），dev 环境加载 `process.env.ELECTRON_RENDERER_URL`，生产加载本地 HTML。
+  - `openSearchWindow()`：420×528，不可缩放；若已存在则刷新上下文并聚焦。
+  - `sendToRenderer(channel, payload)`、`sendSearchContext(context)`、`focusMainWindow()`。
+  - `ensureMainWindow()`：在任何 IPC handler 内保证主窗存在。
 
 ### 6.3 菜单模块（`src/main/menu.ts`）
 
-- `buildApplicationMenu({ sendToRenderer, openSearchWindow })` 构建模板，结构为 `File / Edit / Search / View / Window (+ App on macOS)`。
-- 菜单项通过注入的 `sendToRenderer` 派发 `menu:new-file`、`menu:open-file`、`menu:save-file`、`menu:save-file-as`、`menu:close-tab`。
-- `Search › Find…` 调用依赖注入的 `openSearchWindow()`。
-- 根据 `is.dev` 决定使用 `reload` 或 `forceReload`。
+- 模板包含 `File / Edit / Search / View / Window (+ App on macOS)`。
+- `File` 菜单通过 `sendToRenderer` 分发 `menu:new-file|open-file|save-file|save-file-as|close-tab`。
+- `Search › Find…` 调用 `openSearchWindow()`。
+- `View` 内根据 `is.dev` 在 `reload` 与 `forceReload` 间切换，保留 `toggleDevTools`。
+- `Window` 菜单在 macOS 下包含 `front`、`Zoom` 等额外条目。
 
-### 6.4 搜索服务（`src/main/search-service.ts`）
+### 6.4 文件读取与滑窗编辑（`src/main/ipc.ts`）
 
-- 内部维护：
-  - `tabStore: Map<string, SearchableTab>`：存储渲染端同步的标签快照。
-  - `searchResultsStore: Map<string, StoredSearchResultSet>`：缓存历史搜索结果，支持结果内再次搜索。
+- 常量：
+  - `LARGE_FILE_THRESHOLD_BYTES = 2 MiB`，大于阈值即 `isTruncated`。
+  - `DEFAULT_CHUNK_SIZE = 512 KiB`，初始/增量读取大小。
+  - `STREAM_HIGH_WATER_MARK = 512 KiB`（搜索流）。
+- `readFileHead(filePath)`：
+  - 使用 `fs.stat` 获取大小，仅读取首个 chunk。
+  - 记录 `content`、`size`、`loadedBytes`、`chunkSize`、`isTruncated`、`lineCount`、`loadedLineCount`。
+  - `< 2 MiB` 的文件直接加载完整内容并可编辑。
+- `readFiles(filePaths)`：去重后批量调用 `readFileHead`，供 `open-file-dialog` 与 `read-files-from-paths` 返回。
+- `readFileRange({ filePath, start, length })`：
+  - 对 `start`、`length` 做边界校验。
+  - 使用 `fs.open` + `handle.read` 读取窗口内容。
+  - `lineCache: Map<filePath, Map<byteOffset,line>>` 用于缓存偏移到行号的映射；每次返回 `startLine`、`lineCount`、`hasMore`。
+- `applyWindowEdit({ filePath, rangeStart, rangeEnd, replacement })`：
+  - 通过 `copySegment` 把 `0..rangeStart`、`rangeEnd..EOF` 流式写入临时文件，在中间插入 `replacement`。
+  - 写完即 `fs.rename` 覆盖原文件，并返回最新 `size`；失败时删除临时文件。
+  - 成功后清理 `lineCache`，以便后续 `readFileRange` 可重新计算行号。
+- `save-file-dialog`：
+  - 若 `payload.filePath` 为空则弹出对话框。
+  - `sourcePath` 存在时执行 `fs.copyFile`（滑窗 Save As），否则写入 `content` 并调用 `searchService.updateTabContentByFilePath` 保持搜索缓存最新。
+- 其余辅助：`countLinesInFile`（流式统计行数）、`getLineBreakStats`、`getLineNumberForOffset`。
+
+### 6.5 搜索服务（`src/main/search-service.ts`）
+
+- 状态：
+  - `tabStore: Map<string, SearchableTab>` —— 存储渲染端同步的标签快照（含 `size`、`loadedRange`、`isTruncated`、`lineCount` 等）。
+  - `searchResultsStore: Map<string, StoredSearchResultSet>` —— 缓存父子搜索链。
 - `performSearch(request)`：
-  - 调用 `normalizeRequest` 统一空白 trimming 和默认 scope/dedupe。
-  - `buildMatchers` 根据正则/大小写构造 `matcher` 与 `excludeMatcher`。
-  - 若 scope 为 `search`，从缓存结果中过滤；否则遍历 `tabStore`，调用 `findMatches` 扫描文本。
-  - 生成 `SearchResponsePayload`（含新 `searchId`、父搜索 ID、结果集合）并写入缓存。
-- `findMatches`：逐行遍历文本，处理正则/普通匹配、排除条件、零长度匹配补偿。
-- `filterSearchResults`：对已有搜索结果执行二次匹配，聚合行级别的匹配。
-- 其他 API：
-  - `syncTabState(tab)` / `removeTabState(tabId)`：更新/删除 `tabStore`。
-  - `disposeSearchResults(searchId)`：删除对应缓存。
-  - `updateTabContentByFilePath(filePath, content)`：保存文件后刷新缓存内容。
-
-### 6.5 IPC 注册（`src/main/ipc.ts`）
-
-- 统一绑定 `ipcMain.handle/on`：
-  - `open-file-dialog`：使用 `dialog.showOpenDialog` 读取多个文件，返回 `OpenedFile[]`（包含绝对路径、文件名、文本内容）。
-  - `read-files-from-paths`：接收渲染层拖拽提供的路径数组，去重后逐一校验与读取磁盘，返回 `OpenedFile[]`。
-  - `save-file-dialog`：根据 payload 保存文件；若无路径则弹出保存对话框；成功后调用 `searchService.updateTabContentByFilePath`。
-  - `perform-search`：委托 `searchService.performSearch`，失败时记录错误。
-  - `sync-tab-state` / `remove-tab-state`：同步标签缓存。
-  - `display-search-results`、`navigate-to-file-line`：将搜索窗口结果/导航请求转发给主窗口。
-  - `open-search-window`、`focus-main-window`：调用窗口管理器。
-  - `dispose-search-results`：清理缓存。
-  - `update-active-context`：调用 `setActiveContext` 触发广播。
-- `ping` 通道保留调试用途。
+  - `normalizeRequest` 负责 trims、默认 scope（workspace）、`dedupeLines` 默认为 true、清理 `excludeQuery`。
+  - `buildMatchers` 按 `isRegex/matchCase` 生成正则，若 `tab.isTruncated && tab.filePath` 则走 `findMatchesInFile`。
+  - `findMatchesInFile` 通过 `createReadStream` 分片扫描，尊重 `excludeQuery`，遇到零长度匹配时手动推进，最多 `MAX_STREAM_MATCHES = 5000`。
+  - scope.kind === 'search' 时使用 `filterSearchResults` 在已有结果上再次匹配。
+- 其他 API：`syncTabState`、`removeTabState`、`disposeSearchResults`、`updateTabContentByFilePath`、`getTabSnapshot`。
 
 ### 6.6 IPC 通道总览
 
 | Channel | 方向 | Payload | 说明 |
 | --- | --- | --- | --- |
-| `open-file-dialog` | renderer → main (invoke) | - | 弹出多选文件对话框，返回 `OpenedFile[]`（含 `filePath?`、`name`、`content`）。 |
-| `read-files-from-paths` | renderer → main (invoke) | `string[]` | 对拖拽落下的绝对路径去重并读取文本，返回 `OpenedFile[]`。 |
-| `save-file-dialog` | renderer → main (invoke) | `SaveFilePayload` | 若未提供 `filePath`，弹出保存对话框；写入磁盘后返回 `{ canceled, filePath? }`。 |
-| `perform-search` | renderer/search → main (invoke) | `SearchRequest` | 基于缓存标签或历史搜索执行计算，返回 `SearchResponsePayload`。 |
-| `sync-tab-state` | renderer → main | `SearchableTab` | 文本变更时同步标签快照。 |
-| `remove-tab-state` | renderer → main | `tabId: string` | 标签关闭时移除缓存。 |
-| `display-search-results` | search renderer → main | `SearchResponsePayload` | 搜索窗口把结果广播给主窗口。 |
-| `navigate-to-file-line` | search renderer → main | `{ tabId, line, column? }` | 请求主窗口跳转并高亮。 |
-| `open-search-window` | renderer → main | - | 打开（或聚焦）搜索窗口。 |
-| `dispose-search-results` | renderer → main | `searchId: string` | 搜索标签关闭时清理缓存。 |
-| `update-active-context` | renderer → main | `ActiveContext` | 主窗口标签切换时同步上下文。 |
-| `focus-main-window` | search renderer → main | - | 搜索窗口提交前拉起主窗口。 |
-| `menu:*` | main → renderer | - | 菜单广播 (`menu:new-file` 等)。 |
-| `search:results` | main → renderer | `SearchResponsePayload` | 主进程把搜索结果推送给主窗口。 |
-| `search:navigate` | main → renderer | `{ tabId, line, column? }` | 主进程将搜索窗口的跳转指令发送给主窗口。 |
-| `search:context` | main → search renderer | `ActiveContext` | 搜索窗口根据上下文决定“全局/嵌套”模式。 |
+| `open-file-dialog` | renderer → main (invoke) | - | 弹出多选文件对话框，返回 `OpenedFile[]`（含 `size`、`loadedRange`、`lineCount` 等）。 |
+| `read-files-from-paths` | renderer → main (invoke) | `string[]` | 接收拖拽路径，去重后读取首个 chunk。 |
+| `read-file-range` | renderer → main (invoke) | `FileRangeRequest` | 滑窗加载：返回 `{ start, end, content, totalSize, hasMore, startLine, lineCount }`。 |
+| `apply-window-edit` | renderer → main (invoke) | `WindowEditPayload` | 将当前窗口写回磁盘，返回 `WindowEditResult`（新文件大小）。 |
+| `save-file-dialog` | renderer → main (invoke) | `SaveFilePayload` | 保存/另存。若 `sourcePath` 存在则复制原文件后再写入窗口。 |
+| `perform-search` | renderer/search → main (invoke) | `SearchRequest` | 执行搜索，返回 `SearchResponsePayload`。 |
+| `sync-tab-state` | renderer → main (send) | `SearchableTab` | 同步标签快照，滑窗模式仅同步元数据。 |
+| `remove-tab-state` | renderer → main (send) | `tabId` | 标签关闭时清理缓存。 |
+| `display-search-results` | search renderer → main | `SearchResponsePayload` | 搜索窗口把结果推送给主窗口。 |
+| `navigate-to-file-line` | search renderer → main | `{ tabId, line, column? }` | 搜索窗口请求主窗口跳转。 |
+| `open-search-window` | renderer → main | - | 打开/聚焦搜索窗口。 |
+| `dispose-search-results` | renderer → main | `searchId` | 搜索标签关闭时释放缓存。 |
+| `update-active-context` | renderer → main | `ActiveContext` | 同步当前活动页面。 |
+| `focus-main-window` | search renderer → main | - | 搜索窗口在提交前确保主窗在前台。 |
+| `menu:*` | main → renderer | - | 主进程菜单事件广播。 |
+| `search:results` | main → renderer | `SearchResponsePayload` | 主进程把搜索结果送到主窗口。 |
+| `search:navigate` | main → renderer | `{ tabId, line, column? }` | 搜索窗口发起的跳转指令。 |
+| `search:context` | main → search renderer | `ActiveContext` | 搜索窗口显示当前 scope。 |
 
 ---
 
-## 7. 预加载层需求（`src/preload/index.ts` + `index.d.ts`）
+## 7. 预加载层（`src/preload/index.ts` + `index.d.ts`）
 
-- 复用 `src/common/ipc.ts` 中声明的类型：
-  - `LogEditorApi`、`SearchRequest`、`SearchResponsePayload`、`ActiveContext` 等。
-  - `index.d.ts` 将 `window.api` 显式标注为 `LogEditorApi`，`window.electron` 扩展自 `ElectronAPI`。
-- `index.ts` 通过 `contextBridge` 暴露：
-  - `window.electron`：基于 `electronAPI` 增补 `path.basename`，供渲染层识别文件名。
-  - `window.api`：完全按照共享接口实现，类型安全地封装 `invoke` 与 `ipcRenderer.send`。
-- 工具函数：
-  - `subscribe(channel, listener)`：统一监听器注册，返回解除订阅函数，确保 React `useEffect` 可清理。
-  - `invoke<Result>(channel, payload?)`：包装 `ipcRenderer.invoke` 并回传泛型。
-- API 能力覆盖：文件对话框、路径批量读取、保存对话框、搜索执行、标签同步与移除、搜索结果广播、菜单/搜索事件监听、主窗口聚焦、上下文同步等。
-- 若禁用 `contextIsolation`，仍兜底将对象挂到 `window`，保证兼容性。
-
-`LogEditorApi` 类型（节选，与渲染端共享）：
-
-```ts
-export type OpenedFile = {
-  filePath?: string
-  name: string
-  content: string
-}
-
-export interface LogEditorApi {
-  openFileDialog(): Promise<OpenedFile[]>
-  readFilesFromPaths(filePaths: string[]): Promise<OpenedFile[]>
-  saveFileDialog(payload: SaveFilePayload): Promise<SaveFileResult>
-  performSearch(payload: SearchRequest): Promise<SearchResponsePayload>
-  syncTabState(tab: SearchableTab): void
-  removeTabState(tabId: string): void
-  emitSearchResults(payload: SearchResponsePayload): void
-  emitNavigateToLine(payload: { tabId: string; line: number; column?: number }): void
-  openSearchWindow(): void
-  focusMainWindow(): void
-  disposeSearchResults(searchId: string): void
-  updateActiveContext(context: ActiveContext): void
-  // ... onMenu*, onSearchResults, onSearchNavigate, onSearchContext
-}
-```
+- `subscribe(channel, listener)` 与 `invoke(channel, payload)` 提供统一封装，简化 React `useEffect` 清理。
+- `window.api` 方法：
+  - 文件：`openFileDialog`、`readFilesFromPaths`、`readFileRange`、`applyWindowEdit`、`saveFileDialog`。
+  - 搜索：`performSearch`、`emitSearchResults`、`emitNavigateToLine`。
+  - 状态：`syncTabState`、`removeTabState`、`disposeSearchResults`、`updateActiveContext`、`focusMainWindow`、`openSearchWindow`。
+  - 监听：`onMenu*`、`onSearchResults`、`onSearchNavigate`、`onSearchContext`。
+- 暴露 `window.electron.path.basename`，供渲染端在无 `filePath` 的情况下构造标题。
+- 若 `contextIsolation` 关闭，则退回到 `window.electron`/`window.api` 兼容模式。
+- `env.d.ts` re-export `src/common/ipc.ts` 中的所有类型，React 组件直接 `import type { ... } from '@renderer/env'`。
 
 ---
 
@@ -222,139 +206,161 @@ export interface LogEditorApi {
 
 ### 8.1 标签类型与工具
 
-- `tab-manager/tab-types.ts`：声明 `FileTab`、`SearchTab`、`WelcomeTab` 及类型守卫，常量 `WELCOME_TAB_ID`。
-- `tab-manager/helpers.ts`：提供 `generateTabId()`（首选 `crypto.randomUUID`）与 `buildDefaultFilename()`、`clamp()`、`truncate()` 等工具。
-- `tab-manager/constants.ts`：集中保存 UI 常量（如 `LINE_NUMBER_GUTTER_WIDTH = 56`）。
-- `tab-manager/search-utils.ts`：处理搜索标签显示逻辑，包括 `buildSearchTabTitle`、`describeScopeDetail`、`groupMatchesByLine`、`buildHighlightSegments`、`computeSnippet` 等。
+- `tab-manager/tab-types.ts`：
+  - `FileTab` 新增 `size`、`loadedRange`、`chunkSize`、`isTruncated`、`isWindowed`、`windowOverlap`、`lineCount`、`loadedLineCount`、`lineWindowStart`、`hasWindowEdits` 等字段。
+  - `SearchTab` 保存 `request`、`results`、`totalMatches`、`parentSearchId`。
+- `helpers.ts`：`generateTabId()` 优先 `crypto.randomUUID`，`buildDefaultFilename()` 生成保存对话框默认名称，`clamp()`、`truncate()`。
+- `constants.ts`：`LINE_NUMBER_GUTTER_WIDTH = 56`、`MAX_SNIPPET_LENGTH = 160`。
+- `utils/text-metrics.ts`：`countLines`、`countLinesForAppend`，配合大型文本增量加载更新行数。
 
-### 8.2 `useTabsController` hook（`tab-manager/useTabsController.ts`）
+### 8.2 `useTabsController`（`tab-manager/useTabsController.ts`）
 
-- 管理标签状态、活动标签 ID、引用缓存：
-  - 初始状态为欢迎页；`tabsRef`、`activeTabIdRef` 与 `activationStackRef`（最近访问栈）用于跨闭包读取最新值，并维护“最近激活”顺序。
-  - `createNewTab()` 在双击空白标签栏或菜单触发时创建新文件标签。
-  - `openFiles()` 调用 `api.openFileDialog()`，并交由 `applyOpenedFiles()` 以“路径优先，其次为小写文件名”组合键去重：命中旧标签则刷新内容并推入激活栈，否则新建标签。
-  - `openFilesFromPaths()` / `openFilesFromContent()` 统一通过 `applyOpenedFiles()` 处理拖拽路径和浏览器 File API 读取的纯文本文件，保证菜单与拖拽逻辑一致。
-  - `handleSave(forceSaveAs)` 依据当前激活文件调用 `api.saveFileDialog()`，更新标题/路径/脏标记。
-  - `closeTab()`/`closeActiveTab()` 会先更新激活栈，再根据栈顶恢复上一次访问的标签；当剩余标签为空时不再自动追加欢迎标签，而是保持列表为空并广播 `activeTabId = null`（欢迎内容仍由 UI 条件渲染）。
-  - `handleSearchResults()` 创建/插入 `SearchTab`，支持按父搜索 ID 插入到父标签之后。
-  - `handleSearchResultSelect(result, match)` 激活对应文件标签，供外层组件高亮定位。
-- 副作用：
-  - 每次 `tabs` 变化时调用 `api.syncTabState()` 同步内容缓存，并裁剪激活栈中已被移除的标签 ID。
-  - 活动标签变化时构建 `ActiveContext` 并调用 `api.updateActiveContext()`。
-  - 组件卸载时自动释放所有搜索结果缓存。
-- 菜单与 IPC 监听：
-  - 通过 `api.onMenu*` 绑定菜单快捷方式。
-  - 监听 `api.onSearchResults` 处理搜索结果。
+- 状态：
+  - `tabs`, `activeTabId`, `tabsRef`, `activeTabIdRef`, `activationStackRef`（最近访问顺序）。
+  - `pendingSyncMapRef` 避免在 >8 MB 文件上同步全文内容，仅同步元数据（`LARGE_FILE_SYNC_THRESHOLD_BYTES = 8 MiB`）。
+- 核心行为：
+  - `applyOpenedFiles` 以 `path` 优先、否则以 `name.toLowerCase()` 去重；若 `OpenedFile.isTruncated && filePath`，则打开窗口模式并设置 `windowOverlap = min(64 KiB, chunkSize/2)`。
+  - `createNewTab` / `openFiles` / `openFilesFromPaths` / `openFilesFromContent`：支持菜单、拖拽、浏览器 File API 读取 blob（当拖拽源无真实路径时）。
+  - `updateTabContent`：非窗口模式直接修改全文；窗口模式标记 `hasWindowEdits` 并在 `lineCount` 上累加差值。
+  - `handleSave(forceSaveAs)`：窗口模式调用 `api.applyWindowEdit`；`Save As` 时通过 `sourcePath` 复制原文件再应用窗口补丁。普通文件走 `saveFileDialog`，写入后清除 `isDirty`。
+  - `handleSearchResults`：创建或插入 `SearchTab`（若有 `parentSearchId` 则紧随父节点）。
+  - `handleSearchResultSelect` + `ensureLineVisible`：双击搜索结果时会在滑窗中自动分页直到目标行可见。
+  - `loadMoreContent(tabId, direction)`：
+    - 普通截断文件：追加 `readFileRange` 返回的内容，直到 `hasMore === false`。
+    - 窗口模式：替换 `content`，更新 `lineWindowStart`、`loadedRange`，并阻止在 `hasWindowEdits === true` 时切窗。
+  - `jumpToFilePosition(tabId, ratio)`：配合滚动条跳转至文件任意位置。
+  - `openFilesFromPaths`/`openFilesFromContent` 支持拖拽 blob，必要时通过 `readFilesFromBlobs` 读取文本。
+  - 自动菜单绑定：`onMenuNewFile/open/save/saveAs/closeTab`，组件卸载时删除所有搜索缓存。
+- `api.updateActiveContext` 在 `activeTab` 变化时更新主进程 `activeContext`，供搜索窗口了解 scope。
 
 ### 8.3 `TabManager` 组件（`components/TabManager.tsx`）
 
-- 负责组合 UI 与高亮逻辑：
-  - 使用 `useTabsController` 获取状态与操作。
-  - 维护 `editorRefs`、`highlightRefs`、`lineNumberRefs`、`highlightInfoRef`、`highlightTimeoutRef` 等引用，渲染 textarea 与高亮 overlay。
-  - `focusLine(tabId, line, column)`：计算光标位置、滚动居中、同步行号滚动，并在 2 秒后淡出高亮。
-  - `useEffect`：
-    - 监听激活标签变化，随滚动重新定位高亮层。
-    - 监听 `api.onSearchNavigate`（来自主进程转发的搜索窗口请求），切换标签并调用 `focusLine`。
-    - 管理搜索结果容器的透明度（通过 `MutationObserver` 保持 `opacity:1`）。
-  - 拖拽打开文件：
-    - `collectDroppedFilePaths()` 从 `DataTransfer` 的 `files`、`text/uri-list` 与 `text/plain` 中提取绝对路径并去重；
-    - 若未获取到路径，`collectFilesFromDataTransfer()` 使用浏览器 File API 读取文本内容并包装为 `OpenedFile`；
-    - 组件根节点与编辑区 textarea 都绑定 `onDragOver`/`onDrop`，统一调用 `useTabsController.openFilesFromPaths` / `openFilesFromContent`。
-  - 渲染逻辑：
-    - 标签栏使用最小高度 44px 的 `flex` 容器，背景为浅灰；标签按钮拥有可见边框，激活态填充白色并以天蓝色描边，非激活态为浅灰背景。
-    - 双击标签栏空白区域创建新标签；每个标签右侧以 button 形式提供关闭按钮。
-    - 文件标签区域包含行号列（随着滚动调整 transform）与内容 textarea。
-    - 搜索标签交由 `SearchResultsPanel` 渲染，欢迎标签使用居中文案。
+- 维护多组 `ref`：
+  - `editorRefs`, `highlightRefs`, `lineViewportRef`, `pendingScrollRatioRef`, `autoScrollIntentRef`。
+  - `lineViewport` 通过 `requestAnimationFrame` 与 textarea 的滚动事件实时估算首行、偏移、可视行数（最多渲染 400 个行号）。
+- 自定义行号与高亮：
+  - `estimateLineNumberGutterWidth` 根据 `lineCount` 增加 gutter 宽度（最大 160px）。
+  - `focusLine(tabId, line, column)` 负责滚动居中并在 2 秒后淡出高亮。
+- 大文件 banner：
+  - 仅在 `tab.isWindowed === false && tab.isTruncated === true` 时显示 read-only 横幅，包含字节/行统计与 “Load next chunk” 按钮。
+  - 启用滑窗 (`tab.isWindowed === true`) 后隐藏横幅，窗口切换由滚动位置与 `WindowedScrollBar` 驱动。
+- 自定义滚动条：
+  - `WindowedScrollBar` 被复用两次：滑窗模式显示文件窗口范围，普通模式与 textarea 滚动进度同步。
+  - 当 textarea 滚动到 95% 以上且仍有 `hasMore` 时自动触发 `loadMoreContent`；顶部 5% 会尝试向前加载窗口。
+- 拖拽：
+  - `collectDroppedFilePaths` 支持 `text/uri-list`、`text/plain`、`dataTransfer.files`；若缺乏路径则 `readFilesFromBlobs` 读取 blob 文本。
+- 搜索联动：
+  - 监听 `api.onSearchNavigate`，在跳转前调用 `ensureLineVisible`。
+  - `SearchResultsPanel` 始终保持 `opacity:1`（MutationObserver 强制）。
+- 欢迎页 & 空状态：
+  - `tabs === []` 时主区域展示欢迎提示；用户可双击标签栏空白创建新标签。
 
-### 8.4 `SearchResultsPanel` 组件（`tab-manager/SearchResultsPanel.tsx`）
+### 8.4 `SearchResultsPanel`
 
-- 接收 `SearchTab` 与 `onSelectMatch` 回调：
-  - 顶部摘要展示搜索模式、查询词、排除条件、命中统计。
-  - 结果列表按文件遍历，显示匹配数与匹配片段。
-  - 当 `dedupeLines` 为真时，以 `buildHighlightSegments` 渲染行内多段高亮；否则使用 `computeSnippet` 显示前后文。
-  - 双击或回车触发 `onSelectMatch(result, match)`，交由 `TabManager` 定位。
-  - 使用 `ref` 暴露给 `TabManager`，以统一控制滚动容器透明度。
+- 显示：
+  - 顶部摘要包含 scope（workspace / nested）、查询/排除概览、命中数。
+  - `groupMatchesByLine`：`dedupeLines === true` 时同一行只显示一次并以 `buildHighlightSegments` 渲染多段高亮；否则使用 `computeSnippet`。
+- 交互：
+  - 双击行或按 Enter 调用 `onSelectMatch`，由 `TabManager` 跳转并高亮。
+  - 使用 `forwardRef` 暴露滚动容器，便于上层保持不透明度。
+  - `totalMatches` 写入标签标题（例如 “Search: "foo" (42)”）。
 
-### 8.5 欢迎页与编辑体验
+### 8.5 `WindowedScrollBar`
 
-- 欢迎页内容提醒用户使用菜单创建/打开日志或调用搜索。
-- 欢迎标签可以像普通标签一样关闭；当 `tabs` 为空时，标签栏保持最小高度但不自动生成新标签，欢迎内容由 `activeTabId === null` 条件渲染。
-- 文本编辑区采用 `editor-scrollbar` 自定义滚动条（浅蓝色滑块），并按等宽字体渲染。
-- 行号与高亮 overlay 使用绝对定位结合 scroll 事件调整，保证高亮与内容同步。
+- Props：`startRatio`、`endRatio`、`disabled`、`onSeek`。
+- Thumb 最小高度 4%，拖拽使用 Pointer 事件，`renderStartRatio` 与 `thumbRatio` 保证窗口范围可视化。
+- 滑窗模式：`startRatio/endRatio` 取自 `tab.loadedRange / tab.size`；普通模式：来自 `standardScrollMetricsRef`。
 
----
+### 8.6 欢迎页、拖拽与粘性滚动
 
-## 9. 搜索窗口（`src/renderer/search.*`）
-
-- **HTML 布局**：`search.html` 定义表单字段：
-  - `query`（必填）、`exclude-query`（可选）、`regex`、`match-case`、`dedupe-lines`（默认开启）。
-  - 表单底部展示状态消息，ARIA `role="status"`，`data-state` 区分 `idle/pending/success/error`。
-  - `<script type="module" src="/src/search.ts">` 作为入口。
-- **样式**：`search.css`
-  - 使用 `--window-opacity` 控制窗口聚焦时的不透明度；按钮渐变、磨砂卡片风格。
-  - 响应式：宽度 <= 520px 时调整内边距与圆角。
-- **脚本逻辑** (`search.ts`)：
-  - 初始时聚焦 `query`，同步上下文提示。
-  - 监听 `window.api.onSearchContext` 更新 `currentContext`（`workspace` 或 `search`）。
-  - `handleSearch()`：
-    - 构造 `SearchRequest`（含 `dedupeLines` 与 `excludeQuery`）。
-    - `window.api.focusMainWindow()` 以确保主窗口在前台。
-    - 调用 `window.api.performSearch()`，随后 `window.api.emitSearchResults()` 将结果推送给主窗口。
-    - 根据匹配数量更新状态文本；异常时展示错误消息。
-  - 监听窗口 `focus/blur` 调整 `--window-opacity`，提供视觉反馈。
+- 欢迎页提醒用户通过菜单创建/打开/搜索。
+- 文本区域 `onDragOver/onDrop` 与根容器一致，避免阻塞系统拖放。
+- 自定义滚动条（`index.css`) 隐藏浏览器原生滚动条，配合 `WindowedScrollBar` 使用。
 
 ---
 
-## 10. 样式与设计系统
+## 9. 大文件窗口化
 
-- 主窗口依赖 Tailwind 原子类；`src/renderer/src/index.css` 导入 `@tailwindcss` 并定义 monospace 字体、浅色背景。
-- 自定义滚动条（`editor-scrollbar`）使用浅蓝滑块与圆角轨道。
-- 搜索窗口使用独立的 `Inter` 字体族、渐变背景，与主界面保持一致的配色体系。
-- 行号与高亮 overlay 通过内联样式动态控制位置与透明度。
+- 滑窗设计详见 `doc/large-file-windowing.md`：
+  - 阈值、chunk 大小、窗口重叠、最大可视行数。
+  - `read-file-range`/`apply-window-edit` 协议。
+  - `loadMoreContent`/`jumpToFilePosition`/`ensureLineVisible` 算法。
+  - `MAX_STREAM_MATCHES = 5000` 避免搜索结果爆炸。
+- `doc/memory-optimization-notes.md` 提供 40 MB+ 样本的 Activity Monitor 截图及验证 checklist，证明滑窗方案能稳定内存占用。
+
+实现任何新的文件读取策略或 UI 变更时必须同步更新上述文档与本需求说明。
 
 ---
 
-## 11. 配置与构建要求
+## 10. 搜索窗口（`src/renderer/src/search.*`）
+
+- 表单字段：`query`（必填）、`exclude-query`、`regex`、`match-case`、`dedupe-lines`（默认 true）。
+- `status` 提示使用 `data-state = idle | pending | success | error`，并在 `window` `focus/blur` 时通过 `--window-opacity` 显示前景/背景状态。
+- `handleSearch()`：
+  - 构造 `SearchRequest`（scope 根据 `window.api.onSearchContext` 的 `ActiveContext` 判定）。
+  - 调用 `window.api.focusMainWindow()`，执行 `performSearch`，随后 `emitSearchResults`。
+  - 根据返回结果更新提示文本（0 命中显示 “No matches found.”）。
+- `queryInput` 初始化即获取焦点并选中当前文本。
+- UI 风格：Inter 字体、渐变背景、毛玻璃卡片，宽度 <= 520px 时调整 padding/圆角。
+
+---
+
+## 11. 样式与设计系统
+
+- 主窗口：
+  - `src/renderer/src/index.css` 仅导入 Tailwind 并设定 `JetBrains Mono` 字体、自定义滚动条（完全隐藏滚动条轨迹，交给 `WindowedScrollBar`）。
+  - UI 主色为浅灰/天蓝，`TabManager` 使用 Tailwind 原子类布局。
+- 搜索窗口：
+  - `search.css` 定义渐变背景、按钮阴影、`--window-opacity`。
+  - 通过媒体查询适配窄窗口。
+- 自定义高亮：`TabManager` 额外的 overlay `div` 使用 `bg-amber-200/60`，配合 JS 控制 opacity。
+- 图标：`resources/icon.png` 作为 app icon，`src/renderer/src/assets/*` 提供附加 SVG。
+
+---
+
+## 12. 配置与构建要求
 
 - `electron.vite.config.ts`：
-  - renderer `build.rollupOptions.input` 必须同时包含 `src/renderer/index.html` 与 `src/renderer/search.html`，以生成两个窗口入口。
-  - renderer PostCSS 管线包含 `tailwindcss` 与 `autoprefixer`。
-  - 通过别名 `@renderer` 简化相对路径引用。
-- `tailwind.config.js`：扫描 `src` 目录下所有 JS/TS/JSX/TSX 文件。
-- `tsconfig.node.json` / `tsconfig.web.json`：分别针对 Electron 主进程与浏览器上下文配置编译目标；`tsconfig.web.json` 需包含 `"types": ["vite/client"]` 以支持 HMR。
+  - `main/preload` 共用 `externalizeDepsPlugin`。
+  - `renderer` 开启 React 插件、PostCSS（Tailwind + autoprefixer），`rollupOptions.input` 同时包含 `src/renderer/index.html` 和 `src/renderer/search.html`。
+  - Alias `@renderer -> src/renderer/src`。
+- `tailwind.config.js`：扫描 `./src/**/*.{js,ts,jsx,tsx}`。
+- `tsconfig.node.json` / `tsconfig.web.json`：
+  - node 侧 `types: ["electron-vite/node"]`。
+  - web 侧 `jsx: react-jsx`、`paths["@renderer/*"]`、包含 `src/preload/*.d.ts`。
 - `package.json`：
-  - `main` 指向构建后 `./out/main/index.js`。
-  - `postinstall` 钩子运行 `electron-builder install-app-deps`。
+  - `"main": "./out/main/index.js"`。
+  - `postinstall` 运行 `electron-builder install-app-deps`。
+  - Scripts 已在 §3 列出。
+- 打包：`electron-builder.yml`（未在此文件中，但需包含平台 icon、asar 设置等；遵循 electron-builder 文档）。
 
 ---
 
-## 12. 复现清单
+## 13. 复现清单
 
-1. 初始化 electron-vite 模板，启用 React + TypeScript，并添加 Tailwind/PostCSS 配置。
-2. 创建 `src/common/ipc.ts`，集中定义所有跨进程共享类型与 `LogEditorApi` 接口。
-3. 在主进程实现模块化结构：
-   - `window-manager.ts` 管理主/搜索窗口生命周期；
-   - `menu.ts` 构建菜单模板并派发菜单事件；
-   - `search-service.ts` 编写文本搜索与缓存逻辑（含结果内搜索、排除、正则支持）；
-   - `ipc.ts` 注册全部 IPC 通道，协调窗口管理与搜索服务；
-   - `index.ts` 在 Electron 生命周期内 orchestrate 并维护 `activeContext`。
-4. 编写预加载层：
-   - `index.ts` 使用 `contextBridge` 暴露类型安全的 `window.api` 与 `window.electron`；
-   - `index.d.ts` 扩展全局声明并引用共享类型。
-5. 构建 React 渲染层：
-   - 实现 `useTabsController` hook 处理标签状态、菜单事件、IPC 同步；
-   - 使用 `TabManager.tsx` 组合编辑器、高亮逻辑与 `SearchResultsPanel`；
-   - 提供 `tab-manager` 目录下的辅助模块（类型、常量、搜索工具）。
-6. 创建搜索窗口：
-   - `search.html` + `search.css` 渲染界面；
-   - `search.ts` 调用预加载 API 执行搜索、聚焦主窗口并展示状态。
-7. 确保 `src/renderer/src/env.d.ts` re-export 共享类型，为 React 组件提供类型提示。
-8. 验证功能流程：
-  - 新建、打开、保存、另存、关闭标签；
-  - 重复打开同一路径或同名（无路径）文件时应复用现有标签，并在关闭后按照最近激活顺序切回；
-  - 搜索窗口执行普通/正则/排除/嵌套搜索，结果可在主窗口新标签中展示；
-  - 搜索结果双击或菜单导航可定位到文本并显示高亮；
-  - 关闭搜索标签释放缓存，重新打开仍能保留已激活文件内容。
-  - 从文件管理器拖拽日志到窗口任意处应成功打开：若提供文件路径则走 IPC 读取，否则回退浏览器 File API 获取内容。
-
-严格遵守以上条目即可完整复刻当前 LogEditor 项目。
+1. 使用 electron-vite (React + TS) 模板初始化工程，安装列出的依赖。
+2. 创建 `src/common/ipc.ts`，定义所有共享类型与 `LogEditorApi`（包含 `readFileRange`、`applyWindowEdit` 等）。
+3. 主进程模块化：
+   - `window-manager.ts` 管理主/搜索窗口与上下文广播。
+   - `menu.ts` 构建菜单并派发 `menu:*` 事件。
+   - `ipc.ts` 实现文件对话框、拖拽读取、滑窗读取、窗口编辑、保存。
+   - `search-service.ts` 支持正则/排除词/结果内搜索，并在 `isTruncated` + `filePath` 时流式扫描文件。
+   - `index.ts` 负责生命周期与菜单重建。
+4. 预加载层：
+   - `index.ts` 通过 `contextBridge` 暴露 `window.api`，封装订阅/调用。
+   - `index.d.ts` 扩展 `window.electron` 与 `window.api` 类型。
+5. 渲染层：
+   - `useTabsController` 管理所有标签状态、滑窗元数据、菜单快捷键、保存逻辑、搜索结果同步。
+   - `TabManager` 渲染标签栏、欢迎页、textarea + 行号 + 高亮、`WindowedScrollBar`、大文件 banner、拖拽逻辑。
+   - `SearchResultsPanel` + `WindowedScrollBar` + `search-utils` 构建搜索体验。
+   - `search.ts` 实现独立窗口 UI 与 IPC。
+6. 样式：导入 Tailwind，编写 `index.css`/`search.css`，保持滚动条/高亮效果。
+7. 文档：更新 `doc/requirement.md`、`doc/memory-optimization-notes.md`、`doc/large-file-windowing.md` 以反映实现。
+8. 验证流程：
+   - 打开/拖拽多个日志，验证相同路径或同名文件去重并刷新内容。
+   - 在 >2 MB 文件中滚动/拖动 `WindowedScrollBar`，观察横幅、窗口切换、自动加载、`Load next chunk` 按钮。
+   - 编辑窗口内容并保存（包含 `Save As` 场景），确认 `apply-window-edit` 生效且搜索缓存刷新。
+   - 搜索普通/正则/排除/嵌套查询，双击结果后主窗口正确跳转并高亮。
+   - 同步搜索窗口上下文（活动文件/搜索标签）及快捷键菜单。
+   - 关闭搜索标签或文件标签时，确认 `dispose-search-results`/`remove-tab-state` 被触发且不会泄漏缓存。
+   - 运行 `npm run build` + `npm run build:{platform}` 验证打包。
