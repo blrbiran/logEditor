@@ -95,6 +95,28 @@ type ExtractedTransferPayload = {
   blobFiles: File[]
 }
 
+const resolveDroppedFilePath = (file: File): string | null => {
+  const fileWithPath = file as File & { path?: string }
+  if (fileWithPath.path && fileWithPath.path.length > 0) {
+    return fileWithPath.path
+  }
+  const getPathForFile = window.electron?.webUtils?.getPathForFile
+  if (typeof getPathForFile === 'function') {
+    try {
+      const resolvedPath = getPathForFile(file)
+      if (resolvedPath && resolvedPath.length > 0) {
+        return resolvedPath
+      }
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.warn('[TabManager] getPathForFile failed', error)
+      }
+    }
+  }
+  return null
+}
+
 const extractTransferPayload = (transfer: DataTransfer | null): ExtractedTransferPayload => {
   if (!transfer) {
     return { filePaths: [], blobFiles: [] }
@@ -104,9 +126,9 @@ const extractTransferPayload = (transfer: DataTransfer | null): ExtractedTransfe
   const blobFiles: File[] = []
 
   Array.from(transfer.files ?? []).forEach((file) => {
-    const fileWithPath = file as File & { path?: string }
-    if (fileWithPath.path && fileWithPath.path.length > 0) {
-      filePaths.add(fileWithPath.path)
+    const resolvedPath = resolveDroppedFilePath(file)
+    if (resolvedPath) {
+      filePaths.add(resolvedPath)
     } else {
       blobFiles.push(file)
     }
@@ -919,17 +941,25 @@ function TabManager(): React.JSX.Element {
           >
             <span className="max-w-[200px] truncate">{tab.title}</span>
             {isFileTab(tab) && tab.isDirty ? <span className="size-2 rounded-full bg-rose-500" /> : null}
-            <button
-              type="button"
+            <span
+              role="button"
+              tabIndex={0}
               aria-label={`Close ${tab.title}`}
-              className="ml-1 text-xs text-slate-400 transition hover:text-sky-900"
+              className="ml-1 rounded text-xs text-slate-400 transition hover:text-sky-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
               onClick={(event) => {
                 event.stopPropagation()
                 closeTab(tab.id)
               }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  closeTab(tab.id)
+                }
+              }}
             >
               ×
-            </button>
+            </span>
           </button>
         ))}
       </nav>

@@ -1,5 +1,5 @@
-import { contextBridge, ipcRenderer } from 'electron'
-import type { IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { IpcRendererEvent, WebUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { basename } from 'path'
 import type {
@@ -81,10 +81,15 @@ const api: LogEditorApi = {
     subscribe('search:context', listener)
 }
 
+type WebUtilsFileParam = Parameters<WebUtils['getPathForFile']>[0]
+
 const extendedElectronApi = {
   ...electronAPI,
   path: {
     basename
+  },
+  webUtils: {
+    getPathForFile: (file: WebUtilsFileParam) => webUtils.getPathForFile(file)
   }
 }
 

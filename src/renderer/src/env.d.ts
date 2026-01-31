@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import type { ElectronAPI } from '@electron-toolkit/preload'
+import type { WebUtils } from 'electron'
 import type {
   ActiveContext,
   LogEditorApi,
@@ -39,6 +40,7 @@ type ExtendedElectronAPI = ElectronAPI & {
   path: {
     basename: (path: string, ext?: string) => string
   }
+  webUtils?: Pick<WebUtils, 'getPathForFile'>
 }
 
 declare global {
