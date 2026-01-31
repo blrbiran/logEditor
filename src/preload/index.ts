@@ -72,6 +72,7 @@ const api: LogEditorApi = {
   onMenuSaveFileAs: (listener: () => void): RemoveListener =>
     subscribe('menu:save-file-as', listener),
   onMenuCloseTab: (listener: () => void): RemoveListener => subscribe('menu:close-tab', listener),
+  onMenuSplitRight: (listener: () => void): RemoveListener => subscribe('menu:split-right', listener),
   onSearchResults: (listener: (payload: SearchResponsePayload) => void): RemoveListener =>
     subscribe('search:results', listener),
   onSearchNavigate: (

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { DragEvent as ReactDragEvent } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { LogEditorApi, OpenedFile, SearchMatch, SearchResultItem } from '@renderer/env'
 import { SearchResultsPanel } from './tab-manager/SearchResultsPanel'
 import { LINE_NUMBER_GUTTER_WIDTH } from './tab-manager/constants'
@@ -21,6 +21,43 @@ const DEFAULT_CHUNK_SIZE = 512 * 1024
 const LARGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024
 const MAX_RENDERED_LINE_NUMBERS = 400
 const MAX_LINE_NUMBER_GUTTER_WIDTH = 160
+
+type PaneId = 'left' | 'right'
+
+type PaneState = {
+  id: PaneId
+  tabIds: string[]
+  activeTabId: string | null
+}
+
+type SplitLayoutState = {
+  panes: PaneState[]
+  focusedPaneId: PaneId
+}
+
+type TabContextMenuState = {
+  paneId: PaneId
+  tabId: string
+  x: number
+  y: number
+} | null
+
+const PRIMARY_PANE_ID: PaneId = 'left'
+const SECONDARY_PANE_ID: PaneId = 'right'
+const MIN_SPLIT_RATIO = 0.2
+const MAX_SPLIT_RATIO = 0.8
+
+const clampSplitRatio = (value: number): number => clamp(value, MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
+
+const buildViewKey = (paneId: PaneId, tabId: string): string => `${paneId}::${tabId}`
+
+const parseViewKey = (viewKey: string): { paneId: PaneId | null; tabId: string } => {
+  const [paneId, tabId] = viewKey.split('::')
+  if (paneId === PRIMARY_PANE_ID || paneId === SECONDARY_PANE_ID) {
+    return { paneId, tabId }
+  }
+  return { paneId: null, tabId }
+}
 
 const formatBytes = (size: number): string => {
   if (!Number.isFinite(size) || size <= 0) {
@@ -222,7 +259,7 @@ function TabManager(): React.JSX.Element {
   const initialScrollAppliedRef = useRef<Record<string, boolean>>({})
   const pendingScrollRatioRef = useRef<Record<string, number | null>>({})
   const lineViewportRef = useRef<Record<string, LineViewportState>>({})
-  const lineViewportAnimationRef = useRef<number | null>(null)
+  const lineViewportAnimationRef = useRef<Record<string, number | null>>({})
   const [, forceLineViewportRender] = useState(0)
   const autoScrollIntentRef = useRef<Record<string, boolean>>({})
   const defaultLineViewport: LineViewportState = {
@@ -232,10 +269,8 @@ function TabManager(): React.JSX.Element {
     lineHeight: 24,
     paddingTop: 0
   }
-  const highlightInfoRef = useRef<{ tabId: string; line: number } | null>(null)
-  const highlightTimeoutRef = useRef<number | null>(null)
-  const searchContainerRef = useRef<HTMLDivElement | null>(null)
-  const searchObserverRef = useRef<MutationObserver | null>(null)
+  const highlightInfoRef = useRef<Record<string, { line: number }>>({})
+  const highlightTimeoutRef = useRef<Record<string, number>>({})
   const standardScrollMetricsRef = useRef<Record<string, ScrollMetrics>>({})
 
   const {
@@ -243,7 +278,6 @@ function TabManager(): React.JSX.Element {
     activeTabId,
     activeTab,
     tabsRef,
-    activeTabIdRef,
     createNewTab,
     openFilesFromPaths,
     openFilesFromContent,
@@ -256,6 +290,35 @@ function TabManager(): React.JSX.Element {
     ensureLineVisible
   } = useTabsController()
 
+  const [splitLayout, setSplitLayout] = useState<SplitLayoutState>(() => ({
+    panes: [
+      {
+        id: PRIMARY_PANE_ID,
+        tabIds: tabs.map((tab) => tab.id),
+        activeTabId: activeTabId ?? tabs[0]?.id ?? null
+      }
+    ],
+    focusedPaneId: PRIMARY_PANE_ID
+  }))
+  const [splitRatio, setSplitRatio] = useState(0.5)
+  const [isResizing, setIsResizing] = useState(false)
+  const panesContainerRef = useRef<HTMLDivElement | null>(null)
+  const resizeStateRef = useRef<{ startX: number; startRatio: number } | null>(null)
+  const resizeListenersRef = useRef<{ move?: (event: MouseEvent) => void; up?: (event: MouseEvent) => void }>({})
+  const draggingTabRef = useRef<{ tabId: string; sourcePaneId: PaneId } | null>(null)
+  const pendingInsertionPaneRef = useRef<PaneId>(PRIMARY_PANE_ID)
+  const previousPaneCountRef = useRef<number>(1)
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState>(null)
+  const tabMap = useMemo(() => {
+    const map = new Map<string, Tab>()
+    tabs.forEach((tab) => map.set(tab.id, tab))
+    return map
+  }, [tabs])
+
+  const closeTabContextMenu = useCallback(() => {
+    setTabContextMenu(null)
+  }, [])
+
   useEffect(() => {
     const currentIds = new Set(tabs.map((tab) => tab.id))
     Object.keys(initialScrollAppliedRef.current).forEach((tabId) => {
@@ -265,10 +328,101 @@ function TabManager(): React.JSX.Element {
     })
   }, [tabs])
 
+  useEffect(() => {
+    setSplitLayout((prev) => {
+      const tabIds = new Set(tabs.map((tab) => tab.id))
+      let panes = prev.panes.map((pane) => {
+        const filtered = pane.tabIds.filter((tabId) => tabIds.has(tabId))
+        const nextActive = filtered.includes(pane.activeTabId ?? '')
+          ? pane.activeTabId
+          : filtered[filtered.length - 1] ?? null
+        return {
+          ...pane,
+          tabIds: filtered,
+          activeTabId: nextActive
+        }
+      })
+      panes = panes.filter((pane, index) => pane.id !== SECONDARY_PANE_ID || pane.tabIds.length > 0 || index === 0)
+      if (!panes.some((pane) => pane.id === PRIMARY_PANE_ID)) {
+        panes.unshift({
+          id: PRIMARY_PANE_ID,
+          tabIds: [],
+          activeTabId: null
+        })
+      }
+      const assigned = new Set(panes.flatMap((pane) => pane.tabIds))
+      tabs.forEach((tab) => {
+        if (!assigned.has(tab.id)) {
+          const targetPaneId = panes.some((pane) => pane.id === pendingInsertionPaneRef.current)
+            ? pendingInsertionPaneRef.current
+            : panes[0].id
+          panes = panes.map((pane) => {
+            if (pane.id !== targetPaneId) {
+              return pane
+            }
+            return {
+              ...pane,
+              tabIds: [...pane.tabIds, tab.id],
+              activeTabId: tab.id
+            }
+          })
+          assigned.add(tab.id)
+        }
+      })
+      const nextFocused = panes.some((pane) => pane.id === prev.focusedPaneId)
+        ? prev.focusedPaneId
+        : panes[0]?.id ?? PRIMARY_PANE_ID
+      return {
+        panes,
+        focusedPaneId: nextFocused
+      }
+    })
+  }, [tabs])
+
+  useEffect(() => {
+    const currentCount = splitLayout.panes.length
+    const previousCount = previousPaneCountRef.current
+    if (currentCount <= 1) {
+      setSplitRatio(1)
+      pendingInsertionPaneRef.current = PRIMARY_PANE_ID
+    } else if (previousCount <= 1 && currentCount > 1) {
+      setSplitRatio(0.5)
+    } else {
+      setSplitRatio((current) => clampSplitRatio(current || 0.5))
+    }
+    previousPaneCountRef.current = currentCount
+  }, [splitLayout.panes.length])
+
+  useEffect(() => {
+    const validKeys = new Set<string>()
+    splitLayout.panes.forEach((pane) => {
+      pane.tabIds.forEach((tabId) => {
+        validKeys.add(buildViewKey(pane.id, tabId))
+      })
+    })
+    const pruneRecord = <T extends Record<string, unknown>>(record: T) => {
+      Object.keys(record).forEach((key) => {
+        if (!validKeys.has(key)) {
+          delete record[key]
+        }
+      })
+    }
+    pruneRecord(editorRefs.current)
+    pruneRecord(highlightRefs.current)
+    pruneRecord(initialScrollAppliedRef.current)
+    pruneRecord(pendingScrollRatioRef.current)
+    pruneRecord(lineViewportRef.current)
+    pruneRecord(lineViewportAnimationRef.current)
+    pruneRecord(autoScrollIntentRef.current)
+    pruneRecord(highlightInfoRef.current)
+    pruneRecord(highlightTimeoutRef.current)
+    pruneRecord(standardScrollMetricsRef.current)
+  }, [splitLayout])
+
   const updateStandardScrollMetrics = useCallback(
-    (tabId: string, textarea: HTMLTextAreaElement | null) => {
+    (viewKey: string, textarea: HTMLTextAreaElement | null) => {
       if (!textarea) {
-        delete standardScrollMetricsRef.current[tabId]
+        delete standardScrollMetricsRef.current[viewKey]
         return
       }
       const scrollHeight = textarea.scrollHeight || 0
@@ -276,7 +430,7 @@ function TabManager(): React.JSX.Element {
       const scrollable = Math.max(0, scrollHeight - clientHeight)
       const ratio = scrollable > 0 ? textarea.scrollTop / scrollable : 0
       const viewportRatio = scrollHeight > 0 ? Math.min(1, clientHeight / scrollHeight) : 1
-      standardScrollMetricsRef.current[tabId] = {
+      standardScrollMetricsRef.current[viewKey] = {
         scrollRatio: clamp(ratio, 0, 1),
         viewportRatio,
         canScroll: scrollable > 0
@@ -286,43 +440,42 @@ function TabManager(): React.JSX.Element {
   )
 
   const scheduleLineViewportUpdate = useCallback(
-    (tabId: string, textarea: HTMLTextAreaElement | null) => {
+    (viewKey: string, textarea: HTMLTextAreaElement | null) => {
       if (!textarea) {
         return
       }
-      if (lineViewportAnimationRef.current) {
-        cancelAnimationFrame(lineViewportAnimationRef.current)
+      const previousHandle = lineViewportAnimationRef.current[viewKey]
+      if (previousHandle) {
+        cancelAnimationFrame(previousHandle)
       }
-      lineViewportAnimationRef.current = window.requestAnimationFrame(() => {
+      lineViewportAnimationRef.current[viewKey] = window.requestAnimationFrame(() => {
         const styles = getComputedStyle(textarea)
         const lineHeight = parseFloat(styles.lineHeight || '20') || 20
         const paddingTop = parseFloat(styles.paddingTop || '0') || 0
         const scrollTop = textarea.scrollTop
         const firstLine = Math.max(1, Math.floor((scrollTop + paddingTop) / lineHeight) + 1)
-        const offset = (scrollTop + paddingTop) - (firstLine - 1) * lineHeight
-        const visibleLines = Math.max(
-          1,
-          Math.ceil(textarea.clientHeight / lineHeight) + 4
-        )
-        lineViewportRef.current[tabId] = {
+        const offset = scrollTop + paddingTop - (firstLine - 1) * lineHeight
+        const visibleLines = Math.max(1, Math.ceil(textarea.clientHeight / lineHeight) + 4)
+        lineViewportRef.current[viewKey] = {
           firstLine,
           offset,
           visibleLines,
           lineHeight,
           paddingTop
         }
-        updateStandardScrollMetrics(tabId, textarea)
+        updateStandardScrollMetrics(viewKey, textarea)
         forceLineViewportRender((value) => value + 1)
-        lineViewportAnimationRef.current = null
+        lineViewportAnimationRef.current[viewKey] = null
       })
     },
     [updateStandardScrollMetrics]
   )
 
   const focusLine = useCallback(
-    (tabId: string, line: number, column = 1) => {
-      const textarea = editorRefs.current[tabId]
-      const overlay = highlightRefs.current[tabId]
+    (paneId: PaneId, tabId: string, line: number, column = 1) => {
+      const viewKey = buildViewKey(paneId, tabId)
+      const textarea = editorRefs.current[viewKey]
+      const overlay = highlightRefs.current[viewKey]
       if (!textarea || !overlay) {
         return
       }
@@ -350,7 +503,7 @@ function TabManager(): React.JSX.Element {
       const desiredScrollTop = Math.max(0, paddingTop + (targetLine - 1) * lineHeight - visibleArea / 2)
 
       textarea.scrollTop = desiredScrollTop
-      scheduleLineViewportUpdate(tabId, textarea)
+      scheduleLineViewportUpdate(viewKey, textarea)
 
       const paintHighlight = (): void => {
         const top = paddingTop + (targetLine - 1) * lineHeight - textarea.scrollTop
@@ -363,13 +516,14 @@ function TabManager(): React.JSX.Element {
       paintHighlight()
       requestAnimationFrame(paintHighlight)
 
-      highlightInfoRef.current = { tabId, line: targetLine }
-      if (highlightTimeoutRef.current) {
-        window.clearTimeout(highlightTimeoutRef.current)
+      highlightInfoRef.current[viewKey] = { line: targetLine }
+      if (highlightTimeoutRef.current[viewKey]) {
+        window.clearTimeout(highlightTimeoutRef.current[viewKey])
       }
-      highlightTimeoutRef.current = window.setTimeout(() => {
+      highlightTimeoutRef.current[viewKey] = window.setTimeout(() => {
         overlay.style.opacity = '0'
-        highlightInfoRef.current = null
+        delete highlightInfoRef.current[viewKey]
+        delete highlightTimeoutRef.current[viewKey]
       }, 2000)
     },
     [scheduleLineViewportUpdate, tabsRef]
@@ -383,16 +537,18 @@ function TabManager(): React.JSX.Element {
     if (!activeTabRecord || !isFileTab(activeTabRecord)) {
       return
     }
-    const textarea = editorRefs.current[activeTabRecord.id]
-    const overlay = highlightRefs.current[activeTabRecord.id]
+    const paneId = splitLayout.focusedPaneId
+    const viewKey = buildViewKey(paneId, activeTabRecord.id)
+    const textarea = editorRefs.current[viewKey]
+    const overlay = highlightRefs.current[viewKey]
     if (!textarea || !overlay) {
       return
     }
 
     const updateOverlayPosition = (): void => {
-      scheduleLineViewportUpdate(activeTabRecord.id, textarea)
-      const highlight = highlightInfoRef.current
-      if (!highlight || highlight.tabId !== activeTabIdRef.current) {
+      scheduleLineViewportUpdate(viewKey, textarea)
+      const highlight = highlightInfoRef.current[viewKey]
+      if (!highlight) {
         overlay.style.opacity = '0'
         return
       }
@@ -410,135 +566,157 @@ function TabManager(): React.JSX.Element {
     return () => {
       textarea.removeEventListener('scroll', updateOverlayPosition)
     }
-  }, [activeTabId, activeTabIdRef, tabsRef, scheduleLineViewportUpdate])
+  }, [activeTabId, tabsRef, scheduleLineViewportUpdate, splitLayout.focusedPaneId])
   useEffect(() => {
     if (!activeTab || !isFileTab(activeTab)) {
       return
     }
-    const textarea = editorRefs.current[activeTab.id]
+    const viewKey = buildViewKey(splitLayout.focusedPaneId, activeTab.id)
+    const textarea = editorRefs.current[viewKey]
     if (textarea) {
-      scheduleLineViewportUpdate(activeTab.id, textarea)
+      scheduleLineViewportUpdate(viewKey, textarea)
     }
-  }, [activeTab, scheduleLineViewportUpdate])
+  }, [activeTab, scheduleLineViewportUpdate, splitLayout.focusedPaneId])
 
   useEffect(() => {
     const raf = window.requestAnimationFrame(() => {
-      tabs.forEach((tab) => {
-        if (!isFileTab(tab)) {
-          return
-        }
-        const targetRatio = pendingScrollRatioRef.current[tab.id]
+      Object.entries(pendingScrollRatioRef.current).forEach(([viewKey, targetRatio]) => {
         if (targetRatio == null) {
           return
         }
-        const textarea = editorRefs.current[tab.id]
+        const { tabId } = parseViewKey(viewKey)
+        const tabRecord = tabsRef.current.find(
+          (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
+        )
+        if (!tabRecord) {
+          pendingScrollRatioRef.current[viewKey] = null
+          return
+        }
+        const textarea = editorRefs.current[viewKey]
         if (!textarea) {
           return
         }
         const totalLines = Math.max(
-          tab.lineCount ?? 0,
-          tab.lineWindowStart + Math.max(tab.loadedLineCount - 1, 0),
+          tabRecord.lineCount ?? 0,
+          tabRecord.lineWindowStart + Math.max(tabRecord.loadedLineCount - 1, 0),
           1
         )
-        if (totalLines <= 0 && tab.size <= 0) {
-          pendingScrollRatioRef.current[tab.id] = null
+        if (totalLines <= 0 && tabRecord.size <= 0) {
+          pendingScrollRatioRef.current[viewKey] = null
           return
         }
         const startRatio =
-          tab.size > 0
-            ? tab.loadedRange.start / tab.size
-            : (tab.lineWindowStart - 1) / totalLines
+          tabRecord.size > 0
+            ? tabRecord.loadedRange.start / tabRecord.size
+            : (tabRecord.lineWindowStart - 1) / totalLines
         const chunkSpan =
-          tab.size > 0 && tab.loadedRange.end > tab.loadedRange.start
-            ? (tab.loadedRange.end - tab.loadedRange.start) / tab.size
-            : tab.loadedLineCount / totalLines
+          tabRecord.size > 0 && tabRecord.loadedRange.end > tabRecord.loadedRange.start
+            ? (tabRecord.loadedRange.end - tabRecord.loadedRange.start) / tabRecord.size
+            : tabRecord.loadedLineCount / totalLines
         if (chunkSpan <= 0) {
-          pendingScrollRatioRef.current[tab.id] = null
+          pendingScrollRatioRef.current[viewKey] = null
           return
         }
-        const endRatio = startRatio + chunkSpan
-        if (targetRatio < startRatio || targetRatio > endRatio) {
+        if (targetRatio < startRatio || targetRatio > startRatio + chunkSpan) {
           return
         }
         const relative = clamp((targetRatio - startRatio) / chunkSpan, 0, 1)
         const scrollable = textarea.scrollHeight - textarea.clientHeight
         if (scrollable <= 0) {
-          pendingScrollRatioRef.current[tab.id] = null
+          pendingScrollRatioRef.current[viewKey] = null
           return
         }
         textarea.scrollTop = relative * scrollable
-        pendingScrollRatioRef.current[tab.id] = null
-        scheduleLineViewportUpdate(tab.id, textarea)
+        pendingScrollRatioRef.current[viewKey] = null
+        scheduleLineViewportUpdate(viewKey, textarea)
       })
     })
     return () => {
       window.cancelAnimationFrame(raf)
     }
-  }, [scheduleLineViewportUpdate, tabs])
+  }, [scheduleLineViewportUpdate, splitLayout, tabsRef])
 
   useEffect(() => {
     return () => {
-      if (highlightTimeoutRef.current) {
-        window.clearTimeout(highlightTimeoutRef.current)
+      Object.values(highlightTimeoutRef.current).forEach((timeoutId) => {
+        window.clearTimeout(timeoutId)
+      })
+      Object.values(lineViewportAnimationRef.current).forEach((handle) => {
+        if (handle) {
+          cancelAnimationFrame(handle)
+        }
+      })
+      const { move, up } = resizeListenersRef.current
+      if (move) {
+        window.removeEventListener('mousemove', move)
       }
-      searchObserverRef.current?.disconnect()
-      if (lineViewportAnimationRef.current) {
-        cancelAnimationFrame(lineViewportAnimationRef.current)
+      if (up) {
+        window.removeEventListener('mouseup', up)
       }
     }
   }, [])
 
   useEffect(() => {
-    const disposer = api.onSearchNavigate((payload) => {
-      const exists = tabsRef.current.some((tab) => tab.id === payload.tabId)
-      if (!exists) {
+    Object.entries(autoScrollIntentRef.current).forEach(([viewKey, intent]) => {
+      if (!intent) {
         return
       }
-      switchTab(payload.tabId)
-      const ensureAndFocus = async () => {
-        await ensureLineVisible(payload.tabId, payload.line)
-        requestAnimationFrame(() => focusLine(payload.tabId, payload.line, payload.column))
-      }
-      void ensureAndFocus()
-    })
-
-    return () => {
-      disposer()
-    }
-  }, [ensureLineVisible, focusLine, switchTab, tabsRef])
-
-  useEffect(() => {
-    tabs.forEach((tab) => {
-      if (!isFileTab(tab)) {
+      const { tabId } = parseViewKey(viewKey)
+      const fileTab = tabs.find((tab): tab is FileTab => tab.id === tabId && isFileTab(tab))
+      if (!fileTab || fileTab.isLoadingMore) {
         return
       }
-      if (!autoScrollIntentRef.current[tab.id]) {
-        return
-      }
-      if (tab.isLoadingMore) {
-        return
-      }
-      const textarea = editorRefs.current[tab.id]
+      const textarea = editorRefs.current[viewKey]
       if (textarea) {
         textarea.scrollTop = textarea.scrollHeight - textarea.clientHeight
-        scheduleLineViewportUpdate(tab.id, textarea)
+        scheduleLineViewportUpdate(viewKey, textarea)
       }
-      autoScrollIntentRef.current[tab.id] = false
+      autoScrollIntentRef.current[viewKey] = false
     })
   }, [scheduleLineViewportUpdate, tabs])
 
-  const handleDragOver = useCallback((event: ReactDragEvent) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = 'copy'
+  useEffect(() => {
+    if (!tabContextMenu) {
+      return
     }
-  }, [])
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setTabContextMenu(null)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [tabContextMenu])
 
-  const handleDrop = useCallback(
-    (event: ReactDragEvent) => {
+  const createExternalDragOverHandler = useCallback(
+    (paneId?: PaneId) => (event: ReactDragEvent) => {
+      if (draggingTabRef.current) {
+        return
+      }
+      closeTabContextMenu()
       event.preventDefault()
       event.stopPropagation()
+      pendingInsertionPaneRef.current = paneId ?? pendingInsertionPaneRef.current
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'copy'
+      }
+    },
+    [closeTabContextMenu]
+  )
+
+  const createExternalDropHandler = useCallback(
+    (paneId?: PaneId) => (event: ReactDragEvent) => {
+      if (draggingTabRef.current) {
+        return
+      }
+      closeTabContextMenu()
+      event.preventDefault()
+      event.stopPropagation()
+      if (paneId) {
+        pendingInsertionPaneRef.current = paneId
+      }
       const transfer = event.nativeEvent?.dataTransfer ?? event.dataTransfer ?? null
       const { filePaths, blobFiles } = extractTransferPayload(transfer)
 
@@ -577,12 +755,12 @@ function TabManager(): React.JSX.Element {
         })
       }
     },
-    [openFilesFromContent, openFilesFromPaths]
+    [closeTabContextMenu, openFilesFromContent, openFilesFromPaths]
   )
 
   const handleStandardSeek = useCallback(
-    (tabId: string, ratio: number) => {
-      const textarea = editorRefs.current[tabId]
+    (viewKey: string, ratio: number) => {
+      const textarea = editorRefs.current[viewKey]
       if (!textarea) {
         return
       }
@@ -593,14 +771,14 @@ function TabManager(): React.JSX.Element {
         return
       }
       textarea.scrollTop = clamp(ratio, 0, 1) * scrollable
-      scheduleLineViewportUpdate(tabId, textarea)
+      scheduleLineViewportUpdate(viewKey, textarea)
     },
     [scheduleLineViewportUpdate]
   )
 
   const handleFileScroll = useCallback(
-    (tab: FileTab, textarea: HTMLTextAreaElement) => {
-      scheduleLineViewportUpdate(tab.id, textarea)
+    (tab: FileTab, textarea: HTMLTextAreaElement, viewKey: string) => {
+      scheduleLineViewportUpdate(viewKey, textarea)
       if (tab.isWindowed) {
         if (tab.isLoadingMore || tab.isDirty) {
           return
@@ -641,7 +819,7 @@ function TabManager(): React.JSX.Element {
       const targetLine = Math.max(1, Math.floor(scrollRatio * totalLines))
       const targetRatio = targetLine / totalLines
       if (targetRatio >= loadedRatio - 0.02) {
-        autoScrollIntentRef.current[tab.id] = scrollRatio > 0.9
+        autoScrollIntentRef.current[viewKey] = scrollRatio > 0.9
         void loadMoreContent(tab.id, 'forward').catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
@@ -652,55 +830,6 @@ function TabManager(): React.JSX.Element {
     },
     [loadMoreContent, scheduleLineViewportUpdate]
   )
-
-  useEffect(() => {
-    if (activeTab && isSearchTab(activeTab)) {
-      if (searchContainerRef.current) {
-        searchContainerRef.current.style.opacity = '1'
-      }
-    }
-  }, [activeTab])
-
-  useEffect(() => {
-    const container = searchContainerRef.current
-    if (!container || !activeTab || !isSearchTab(activeTab)) {
-      searchObserverRef.current?.disconnect()
-      searchObserverRef.current = null
-      return
-    }
-
-    const enforceOpacity = () => {
-      const currentOpacity = container.style.opacity
-      if (currentOpacity !== '' && currentOpacity !== '1') {
-        container.style.opacity = '1'
-      }
-    }
-
-    enforceOpacity()
-    container.style.transition = 'none'
-
-    const observer = new MutationObserver(enforceOpacity)
-    observer.observe(container, { attributes: true, attributeFilter: ['style'] })
-    searchObserverRef.current = observer
-
-    const handleScrollOrPointer = () => {
-      enforceOpacity()
-    }
-
-    container.addEventListener('scroll', handleScrollOrPointer)
-    container.addEventListener('mouseenter', handleScrollOrPointer)
-    container.addEventListener('mouseleave', handleScrollOrPointer)
-
-    return () => {
-      observer.disconnect()
-      if (searchObserverRef.current === observer) {
-        searchObserverRef.current = null
-      }
-      container.removeEventListener('scroll', handleScrollOrPointer)
-      container.removeEventListener('mouseenter', handleScrollOrPointer)
-      container.removeEventListener('mouseleave', handleScrollOrPointer)
-    }
-  }, [activeTab])
 
   const renderWelcomeContent = useCallback(
     () => (
@@ -715,38 +844,437 @@ function TabManager(): React.JSX.Element {
     []
   )
 
+  const focusPane = useCallback((paneId: PaneId) => {
+    pendingInsertionPaneRef.current = paneId
+    setSplitLayout((prev) => {
+      if (prev.focusedPaneId === paneId || !prev.panes.some((pane) => pane.id === paneId)) {
+        return prev
+      }
+      return {
+        ...prev,
+        focusedPaneId: paneId
+      }
+    })
+  }, [])
+
+  const ensurePaneExists = useCallback((paneId: PaneId) => {
+    if (paneId === PRIMARY_PANE_ID) {
+      return
+    }
+    let created = false
+    setSplitLayout((prev) => {
+      if (prev.panes.some((pane) => pane.id === paneId)) {
+        return prev
+      }
+      created = true
+      const primary =
+        prev.panes.find((pane) => pane.id === PRIMARY_PANE_ID) ?? {
+          id: PRIMARY_PANE_ID,
+          tabIds: [],
+          activeTabId: null
+        }
+      return {
+        panes: [
+          primary,
+          {
+            id: paneId,
+            tabIds: [],
+            activeTabId: null
+          }
+        ],
+        focusedPaneId: prev.focusedPaneId
+      }
+    })
+    if (created) {
+      setSplitRatio(0.5)
+    }
+  }, [])
+
+  const activateTabInPane = useCallback(
+    (paneId: PaneId, tabId: string, options?: { focus?: boolean }) => {
+      const shouldFocus = options?.focus ?? true
+      ensurePaneExists(paneId)
+      setSplitLayout((prev) => {
+        if (!prev.panes.some((pane) => pane.id === paneId)) {
+          return prev
+        }
+        const panes = prev.panes.map((pane) => {
+          if (pane.id !== paneId) {
+            return pane
+          }
+          const hasTab = pane.tabIds.includes(tabId)
+          return {
+            ...pane,
+            tabIds: hasTab ? pane.tabIds : [...pane.tabIds, tabId],
+            activeTabId: tabId
+          }
+        })
+        return {
+          panes,
+          focusedPaneId: shouldFocus ? paneId : prev.focusedPaneId
+        }
+      })
+      pendingInsertionPaneRef.current = paneId
+      if (shouldFocus) {
+        switchTab(tabId)
+      }
+    },
+    [ensurePaneExists, switchTab]
+  )
+
+  const moveTabBetweenPanes = useCallback(
+    (tabId: string, sourcePaneId: PaneId, targetPaneId: PaneId, targetIndex?: number) => {
+      ensurePaneExists(targetPaneId)
+      setSplitLayout((prev) => {
+        if (!prev.panes.some((pane) => pane.id === targetPaneId)) {
+          return prev
+        }
+        const updated = prev.panes.map((pane) => {
+          if (pane.id === sourcePaneId) {
+            const filtered = pane.tabIds.filter((id) => id !== tabId)
+            const nextActive =
+              pane.activeTabId === tabId ? filtered[filtered.length - 1] ?? null : pane.activeTabId
+            return { ...pane, tabIds: filtered, activeTabId: nextActive }
+          }
+          return pane
+        })
+        const nextPanes = updated.map((pane) => {
+          if (pane.id !== targetPaneId) {
+            return pane
+          }
+          const existing = pane.tabIds.filter((id) => id !== tabId)
+          const insertIndex =
+            typeof targetIndex === 'number'
+              ? clamp(targetIndex, 0, existing.length)
+              : existing.length
+          existing.splice(insertIndex, 0, tabId)
+          return {
+            ...pane,
+            tabIds: existing,
+            activeTabId: tabId
+          }
+        })
+        const collapsed = nextPanes.filter(
+          (pane) => pane.id !== SECONDARY_PANE_ID || pane.tabIds.length > 0
+        )
+        const fallback: PaneState = collapsed.find((pane) => pane.id === PRIMARY_PANE_ID) ?? {
+          id: PRIMARY_PANE_ID,
+          tabIds: [],
+          activeTabId: null
+        }
+        const normalized = collapsed.length ? collapsed : [fallback]
+        return {
+          panes: normalized,
+          focusedPaneId: targetPaneId
+        }
+      })
+      pendingInsertionPaneRef.current = targetPaneId
+      switchTab(tabId)
+    },
+    [ensurePaneExists, switchTab]
+  )
+
+  const removeTabFromPane = useCallback((paneId: PaneId, tabId: string) => {
+    setSplitLayout((prev) => {
+      const panes = prev.panes.map((pane) => {
+        if (pane.id !== paneId) {
+          return pane
+        }
+        const filtered = pane.tabIds.filter((id) => id !== tabId)
+        const nextActive =
+          pane.activeTabId === tabId ? filtered[filtered.length - 1] ?? null : pane.activeTabId
+        return {
+          ...pane,
+          tabIds: filtered,
+          activeTabId: nextActive
+        }
+      })
+      const collapsed = panes.filter(
+        (pane) => pane.id !== SECONDARY_PANE_ID || pane.tabIds.length > 0
+      )
+      const normalized = collapsed.length
+        ? collapsed
+        : [
+            {
+              id: PRIMARY_PANE_ID,
+              tabIds: [],
+              activeTabId: null
+            }
+          ]
+      const nextFocused =
+        normalized.some((pane) => pane.id === prev.focusedPaneId) && prev.focusedPaneId !== paneId
+          ? prev.focusedPaneId
+          : normalized[0]?.id ?? PRIMARY_PANE_ID
+      return {
+        panes: normalized,
+        focusedPaneId: nextFocused
+      }
+    })
+  }, [])
+
+  const splitTabToRight = useCallback(
+    (tabId: string) => {
+      if (!tabMap.has(tabId)) {
+        return
+      }
+      activateTabInPane(SECONDARY_PANE_ID, tabId, { focus: true })
+    },
+    [activateTabInPane, tabMap]
+  )
+
+  const splitActiveTabToRight = useCallback(() => {
+    const focusedPane =
+      splitLayout.panes.find((pane) => pane.id === splitLayout.focusedPaneId) ??
+      splitLayout.panes[0]
+    const targetTabId =
+      focusedPane?.activeTabId ?? activeTabId ?? tabs[0]?.id ?? null
+    if (!targetTabId) {
+      return
+    }
+    splitTabToRight(targetTabId)
+  }, [activeTabId, splitLayout.focusedPaneId, splitLayout.panes, splitTabToRight, tabs])
+
+  const getPaneTabIds = useCallback(
+    (paneId: PaneId): string[] => splitLayout.panes.find((pane) => pane.id === paneId)?.tabIds ?? [],
+    [splitLayout.panes]
+  )
+
+  const getOppositePaneId = useCallback(
+    (paneId: PaneId): PaneId | null => {
+      if (splitLayout.panes.length < 2) {
+        return null
+      }
+      const other = splitLayout.panes.find((pane) => pane.id !== paneId)
+      return other?.id ?? null
+    },
+    [splitLayout.panes]
+  )
+
+  const handleTabDragStart = useCallback(
+    (paneId: PaneId, tabId: string) => (event: ReactDragEvent<HTMLButtonElement>) => {
+      closeTabContextMenu()
+      draggingTabRef.current = { tabId, sourcePaneId: paneId }
+      event.dataTransfer?.setData('text/plain', tabId)
+      event.dataTransfer?.setDragImage(event.currentTarget, 0, 0)
+    },
+    [closeTabContextMenu]
+  )
+
+  const handleTabDragEnd = useCallback(() => {
+    draggingTabRef.current = null
+  }, [])
+
+  const handleTabDragOver = useCallback(
+    (paneId: PaneId) => (event: ReactDragEvent) => {
+      if (!draggingTabRef.current) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      pendingInsertionPaneRef.current = paneId
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move'
+      }
+    },
+    []
+  )
+
+  const handleTabDropOnTab = useCallback(
+    (paneId: PaneId, targetTabId: string) => (event: ReactDragEvent) => {
+      const dragging = draggingTabRef.current
+      if (!dragging) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      draggingTabRef.current = null
+      const currentTabs = getPaneTabIds(paneId)
+      const targetIndex = currentTabs.indexOf(targetTabId)
+      moveTabBetweenPanes(dragging.tabId, dragging.sourcePaneId, paneId, targetIndex)
+    },
+    [getPaneTabIds, moveTabBetweenPanes]
+  )
+
+  const handleTabBarDrop = useCallback(
+    (paneId: PaneId) => (event: ReactDragEvent) => {
+      const dragging = draggingTabRef.current
+      if (!dragging) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      draggingTabRef.current = null
+      moveTabBetweenPanes(dragging.tabId, dragging.sourcePaneId, paneId)
+    },
+    [moveTabBetweenPanes]
+  )
+
+  const handleCloseView = useCallback(
+    (paneId: PaneId, tabId: string) => {
+      const existsElsewhere = splitLayout.panes.some(
+        (pane) => pane.id !== paneId && pane.tabIds.includes(tabId)
+      )
+      removeTabFromPane(paneId, tabId)
+      if (!existsElsewhere) {
+        closeTab(tabId)
+      }
+    },
+    [closeTab, removeTabFromPane, splitLayout.panes]
+  )
+
+  const handleTabContextMenu = useCallback(
+    (paneId: PaneId, tabId: string) => (event: ReactMouseEvent) => {
+      event.preventDefault()
+      closeTabContextMenu()
+      focusPane(paneId)
+      setTabContextMenu({
+        paneId,
+        tabId,
+        x: event.clientX,
+        y: event.clientY
+      })
+    },
+    [closeTabContextMenu, focusPane]
+  )
+
+  const handleContextMenuSplit = useCallback(() => {
+    if (!tabContextMenu) {
+      return
+    }
+    splitTabToRight(tabContextMenu.tabId)
+    closeTabContextMenu()
+  }, [closeTabContextMenu, splitTabToRight, tabContextMenu])
+
+  const handleContextMenuClose = useCallback(() => {
+    if (!tabContextMenu) {
+      return
+    }
+    handleCloseView(tabContextMenu.paneId, tabContextMenu.tabId)
+    closeTabContextMenu()
+  }, [closeTabContextMenu, handleCloseView, tabContextMenu])
+
+  const closeFocusedPaneTab = useCallback(() => {
+    const targetPane =
+      splitLayout.panes.find((pane) => pane.id === splitLayout.focusedPaneId) ??
+      splitLayout.panes[0]
+    if (!targetPane) {
+      return
+    }
+    const targetTabId =
+      targetPane.activeTabId ?? targetPane.tabIds[targetPane.tabIds.length - 1]
+    if (!targetTabId) {
+      return
+    }
+    handleCloseView(targetPane.id, targetTabId)
+  }, [handleCloseView, splitLayout])
+
+  const handleResizeStart = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!panesContainerRef.current || splitLayout.panes.length < 2) {
+        return
+      }
+      closeTabContextMenu()
+      event.preventDefault()
+      setIsResizing(true)
+      resizeStateRef.current = { startX: event.clientX, startRatio: splitRatio }
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        if (!resizeStateRef.current || !panesContainerRef.current) {
+          return
+        }
+        const bounds = panesContainerRef.current.getBoundingClientRect()
+        if (bounds.width <= 0) {
+          return
+        }
+        const deltaRatio = (moveEvent.clientX - resizeStateRef.current.startX) / bounds.width
+        const nextRatio = clampSplitRatio(resizeStateRef.current.startRatio + deltaRatio)
+        setSplitRatio(nextRatio)
+      }
+      const handleMouseUp = () => {
+        setIsResizing(false)
+        resizeStateRef.current = null
+        window.removeEventListener('mousemove', handleMouseMove)
+        window.removeEventListener('mouseup', handleMouseUp)
+        resizeListenersRef.current = {}
+      }
+      window.addEventListener('mousemove', handleMouseMove)
+      window.addEventListener('mouseup', handleMouseUp)
+      resizeListenersRef.current = { move: handleMouseMove, up: handleMouseUp }
+    },
+    [closeTabContextMenu, splitLayout.panes.length, splitRatio]
+  )
+
+  useEffect(() => {
+    const disposers = [
+      api.onMenuSplitRight(() => splitActiveTabToRight()),
+      api.onMenuCloseTab(() => closeFocusedPaneTab())
+    ]
+    return () => {
+      disposers.forEach((dispose) => dispose())
+    }
+  }, [closeFocusedPaneTab, splitActiveTabToRight])
+
+  useEffect(() => {
+    const disposer = api.onSearchNavigate((payload) => {
+      const exists = tabsRef.current.some((tab) => tab.id === payload.tabId)
+      if (!exists) {
+        return
+      }
+      const paneId = splitLayout.focusedPaneId
+      activateTabInPane(paneId, payload.tabId, { focus: true })
+      const ensureAndFocus = async () => {
+        await ensureLineVisible(payload.tabId, payload.line)
+        requestAnimationFrame(() => focusLine(paneId, payload.tabId, payload.line, payload.column))
+      }
+      void ensureAndFocus()
+    })
+
+    return () => {
+      disposer()
+    }
+  }, [activateTabInPane, ensureLineVisible, focusLine, splitLayout.focusedPaneId, tabsRef])
+
   const handleSelectSearchMatch = useCallback(
-    (result: SearchResultItem, match: SearchMatch) => {
+    (paneId: PaneId, result: SearchResultItem, match: SearchMatch) => {
+      const targetPaneId =
+        getOppositePaneId(paneId) ?? (paneId === PRIMARY_PANE_ID ? SECONDARY_PANE_ID : paneId)
       handleSearchResultSelect(result, match)
+      activateTabInPane(targetPaneId, result.tabId, { focus: true })
       const ensureLoaded = async () => {
         await ensureLineVisible(result.tabId, match.line)
-        requestAnimationFrame(() => focusLine(result.tabId, match.line, match.column))
+        requestAnimationFrame(() => focusLine(targetPaneId, result.tabId, match.line, match.column))
       }
       void ensureLoaded()
     },
-    [ensureLineVisible, focusLine, handleSearchResultSelect]
+    [activateTabInPane, ensureLineVisible, focusLine, getOppositePaneId, handleSearchResultSelect]
   )
 
   const renderSearchContent = useCallback(
-    (tab: SearchTab) => (
-      <SearchResultsPanel ref={searchContainerRef} tab={tab} onSelectMatch={handleSelectSearchMatch} />
+    (paneId: PaneId, tab: SearchTab) => (
+      <SearchResultsPanel
+        tab={tab}
+        onSelectMatch={(result, match) => handleSelectSearchMatch(paneId, result, match)}
+      />
     ),
     [handleSelectSearchMatch]
   )
 
-  const renderActiveContent = (tab: Tab | null): React.ReactNode => {
+  const renderPaneContent = (paneId: PaneId, tab: Tab | null): React.ReactNode => {
     if (!tab) {
-      return renderWelcomeContent()
+      return (
+        <div className="flex h-full items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+          Drop a tab here or use the + button to create one.
+        </div>
+      )
     }
     if (isFileTab(tab)) {
+      const viewKey = buildViewKey(paneId, tab.id)
       const loadedBytes = Math.max(0, tab.loadedRange.end - tab.loadedRange.start)
       const totalBytes = tab.size > 0 ? tab.size : loadedBytes
-      const viewport = lineViewportRef.current[tab.id] ?? defaultLineViewport
+      const viewport = lineViewportRef.current[viewKey] ?? defaultLineViewport
       const totalLines = Math.max(tab.loadedLineCount, 1)
       const safeFirstLine = Math.min(Math.max(1, viewport.firstLine), totalLines)
       const chunkRemaining = Math.max(1, totalLines - safeFirstLine + 1)
       const windowStartLine = Math.max(1, tab.lineWindowStart)
-      const windowEndLine = windowStartLine + Math.max(0, tab.loadedLineCount - 1)
       const knownLineCount = tab.lineCount > 0 ? tab.lineCount : 0
       const globalFirstLine = windowStartLine + safeFirstLine - 1
       const fileRemaining =
@@ -764,23 +1292,13 @@ function TabManager(): React.JSX.Element {
         }
         return Math.max(1, globalLineNumber)
       })
-      const canShiftBackward = tab.loadedRange.start > 0
-      const canShiftForward = tab.loadedRange.end < tab.size
       const disableWindowShift = tab.isLoadingMore || tab.isDirty
-      const requestWindowShift = (direction: 'forward' | 'backward') => {
-        void loadMoreContent(tab.id, direction).catch((error) => {
-          if (import.meta.env.DEV) {
-            // eslint-disable-next-line no-console
-            console.error('[TabManager] window shift failed', direction, error)
-          }
-        })
-      }
       const lineNumberGutterWidth = estimateLineNumberGutterWidth(tab)
       const chunkStartRatio =
         tab.size > 0 ? Math.max(0, tab.loadedRange.start / tab.size) : 0
       const chunkEndRatio =
         tab.size > 0 ? Math.min(1, tab.loadedRange.end / tab.size) : 1
-      const scrollMetrics = standardScrollMetricsRef.current[tab.id]
+      const scrollMetrics = standardScrollMetricsRef.current[viewKey]
       const standardScrollStart = scrollMetrics?.scrollRatio ?? 0
       const standardScrollEnd = standardScrollStart + (scrollMetrics?.viewportRatio ?? 1)
       const standardScrollDisabled = scrollMetrics ? !scrollMetrics.canScroll : false
@@ -789,13 +1307,13 @@ function TabManager(): React.JSX.Element {
           return
         }
         const clamped = clamp(nextRatio, 0, 1)
-        pendingScrollRatioRef.current[tab.id] = clamped
+        pendingScrollRatioRef.current[viewKey] = clamped
         void jumpToFilePosition(tab.id, clamped).catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
             console.error('[TabManager] window jump failed', error)
           }
-          pendingScrollRatioRef.current[tab.id] = null
+          pendingScrollRatioRef.current[viewKey] = null
         })
       }
       return (
@@ -859,19 +1377,19 @@ function TabManager(): React.JSX.Element {
             </div>
             <textarea
               ref={(el) => {
-                editorRefs.current[tab.id] = el
-                if (el && !initialScrollAppliedRef.current[tab.id]) {
+                editorRefs.current[viewKey] = el
+                if (el && !initialScrollAppliedRef.current[viewKey]) {
                   el.scrollTop = 0
-                  initialScrollAppliedRef.current[tab.id] = true
+                  initialScrollAppliedRef.current[viewKey] = true
                 }
-                updateStandardScrollMetrics(tab.id, el)
-                scheduleLineViewportUpdate(tab.id, el)
+                updateStandardScrollMetrics(viewKey, el)
+                scheduleLineViewportUpdate(viewKey, el)
               }}
               value={tab.content}
               onChange={(event) => updateTabContent(tab.id, event.target.value)}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
-              onScroll={(event) => handleFileScroll(tab, event.currentTarget)}
+              onDragOver={createExternalDragOverHandler(paneId)}
+              onDrop={createExternalDropHandler(paneId)}
+              onScroll={(event) => handleFileScroll(tab, event.currentTarget, viewKey)}
               readOnly={tab.isReadOnly}
               className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
                 tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
@@ -890,13 +1408,13 @@ function TabManager(): React.JSX.Element {
                 startRatio={standardScrollStart}
                 endRatio={standardScrollEnd}
                 disabled={standardScrollDisabled}
-                onSeek={(ratio) => handleStandardSeek(tab.id, ratio)}
+                onSeek={(ratio) => handleStandardSeek(viewKey, ratio)}
               />
             )}
           </div>
           <div
             ref={(el) => {
-              highlightRefs.current[tab.id] = el
+              highlightRefs.current[viewKey] = el
             }}
             className="pointer-events-none absolute right-0 bg-amber-200/60 opacity-0 transition-opacity"
             style={{ left: `${lineNumberGutterWidth}px` }}
@@ -908,67 +1426,169 @@ function TabManager(): React.JSX.Element {
       return renderWelcomeContent()
     }
     if (isSearchTab(tab)) {
-      return renderSearchContent(tab)
+      return renderSearchContent(paneId, tab)
     }
     return null
+  }
+
+  const paneCount = splitLayout.panes.length
+  const getPaneWidth = (index: number): number => {
+    if (paneCount <= 1) {
+      return 1
+    }
+    return index === 0 ? splitRatio : 1 - splitRatio
+  }
+
+  const renderPane = (pane: PaneState, index: number): React.ReactNode => {
+    const width = getPaneWidth(index)
+    const activeTabForPane = pane.activeTabId ? tabMap.get(pane.activeTabId) ?? null : null
+    const paneIsFocused = splitLayout.focusedPaneId === pane.id
+    const tabDragOverHandler = handleTabDragOver(pane.id)
+    const tabBarDropHandler = handleTabBarDrop(pane.id)
+    const externalDragOver = createExternalDragOverHandler(pane.id)
+    const externalDrop = createExternalDropHandler(pane.id)
+    return (
+      <div
+        key={pane.id}
+        className={`flex h-full flex-col border-l border-slate-200 bg-white ${paneIsFocused ? 'ring-1 ring-sky-400' : 'ring-1 ring-transparent'}`}
+        style={{ width: `${width * 100}%` }}
+        onPointerDown={() => focusPane(pane.id)}
+        onDragOver={externalDragOver}
+        onDrop={externalDrop}
+      >
+        <nav
+          className="flex min-h-[40px] items-center gap-1 border-b border-slate-200 bg-slate-100 px-2"
+          onDoubleClick={(event) => {
+            const target = event.target as HTMLElement | null
+            if (!target?.closest('button')) {
+              closeTabContextMenu()
+              pendingInsertionPaneRef.current = pane.id
+              focusPane(pane.id)
+              createNewTab()
+            }
+          }}
+          onDragOver={tabDragOverHandler}
+          onDrop={tabBarDropHandler}
+        >
+          {pane.tabIds.map((tabId) => {
+            const tab = tabMap.get(tabId)
+            if (!tab) {
+              return null
+            }
+            const isActiveInPane = pane.activeTabId === tabId
+            const dragStartHandler = handleTabDragStart(pane.id, tab.id)
+            const dropOnTabHandler = handleTabDropOnTab(pane.id, tab.id)
+            const contextMenuHandler = handleTabContextMenu(pane.id, tab.id)
+            return (
+              <button
+                key={`${pane.id}-${tab.id}`}
+                type="button"
+                draggable
+                onDragStart={dragStartHandler}
+                onDragEnd={handleTabDragEnd}
+                onDrop={dropOnTabHandler}
+                onContextMenu={contextMenuHandler}
+                onClick={() => activateTabInPane(pane.id, tab.id)}
+                className={`group flex h-9 items-center gap-2 rounded px-3 text-sm transition ${
+                  isActiveInPane
+                    ? 'bg-white text-sky-700 shadow-sm'
+                    : 'bg-slate-200/70 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                }`}
+              >
+                <span className="max-w-[160px] truncate">{tab.title}</span>
+                {isFileTab(tab) && tab.isDirty ? (
+                  <span className="size-2 rounded-full bg-rose-500" />
+                ) : null}
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Close ${tab.title}`}
+                  className="ml-1 rounded px-1 text-xs text-slate-400 transition hover:bg-slate-200 hover:text-slate-900"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    closeTabContextMenu()
+                    handleCloseView(pane.id, tab.id)
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      closeTabContextMenu()
+                      handleCloseView(pane.id, tab.id)
+                    }
+                  }}
+                >
+                  ×
+                </span>
+              </button>
+            )
+          })}
+          <button
+            type="button"
+            className="ml-auto rounded border border-slate-300 px-2 text-sm text-slate-600 transition hover:border-sky-400 hover:text-sky-600"
+            onClick={() => {
+              closeTabContextMenu()
+              pendingInsertionPaneRef.current = pane.id
+              focusPane(pane.id)
+              createNewTab()
+            }}
+          >
+            +
+          </button>
+        </nav>
+        <div className="flex-1 overflow-hidden">
+          {renderPaneContent(pane.id, activeTabForPane ?? null)}
+        </div>
+      </div>
+    )
   }
 
   return (
     <div
       className="relative flex h-full flex-col bg-slate-50 text-slate-900"
-      onDragOver={handleDragOver}
-      onDrop={handleDrop}
+      onDragOver={createExternalDragOverHandler()}
+      onDrop={createExternalDropHandler()}
     >
-      <nav
-        className="flex min-h-[44px] items-center gap-1 overflow-x-auto border-b border-slate-200 bg-slate-200"
-        onDoubleClick={(event) => {
-          const target = event.target as HTMLElement
-          if (!target.closest('button')) {
-            createNewTab()
-          }
-        }}
-      >
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => switchTab(tab.id)}
-            className={`group flex h-11 items-center gap-2 border px-4 text-sm font-medium transition ${
-              tab.isActive
-                ? 'border-sky-500 bg-white text-sky-700'
-                : 'border-transparent bg-slate-100 text-slate-500 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'
-            }`}
-          >
-            <span className="max-w-[200px] truncate">{tab.title}</span>
-            {isFileTab(tab) && tab.isDirty ? <span className="size-2 rounded-full bg-rose-500" /> : null}
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={`Close ${tab.title}`}
-              className="ml-1 rounded text-xs text-slate-400 transition hover:text-sky-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-              onClick={(event) => {
-                event.stopPropagation()
-                closeTab(tab.id)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  closeTab(tab.id)
-                }
-              }}
-            >
-              ×
-            </span>
-          </button>
+      <main ref={panesContainerRef} className="flex flex-1 overflow-hidden bg-slate-100">
+        {splitLayout.panes.map((pane, index) => (
+          <Fragment key={pane.id}>
+            {renderPane(pane, index)}
+            {index === 0 && splitLayout.panes.length > 1 ? (
+              <div
+                className={`flex h-full w-1 cursor-col-resize flex-col bg-slate-200 transition ${isResizing ? 'bg-sky-400' : 'hover:bg-slate-300'}`}
+                onMouseDown={handleResizeStart}
+              >
+                <span className="sr-only">Resize panes</span>
+              </div>
+            ) : null}
+          </Fragment>
         ))}
-      </nav>
-
-      <main className="flex-1 overflow-hidden bg-slate-100">
-        <div className="h-full overflow-hidden border border-slate-200 bg-white shadow-sm">
-          {renderActiveContent(activeTab)}
-        </div>
       </main>
+      {tabContextMenu ? (
+        <>
+          <div className="fixed inset-0 z-40" onClick={closeTabContextMenu} />
+          <div
+            className="fixed z-50 w-48 rounded-md border border-slate-200 bg-white p-1 text-left shadow-lg"
+            style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"
+              onClick={handleContextMenuSplit}
+            >
+              Split Right
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"
+              onClick={handleContextMenuClose}
+            >
+              Close Tab
+            </button>
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }

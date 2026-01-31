@@ -110,9 +110,23 @@ export const buildApplicationMenu = ({ sendToRenderer, openSearchWindow }: MenuD
             { role: 'zoom' },
             { label: 'Close Window', accelerator: 'CmdOrCtrl+Shift+W', role: 'close' },
             { type: 'separator' },
+            {
+              label: 'Split Right',
+              accelerator: 'CmdOrCtrl+\\',
+              click: () => sendToRenderer('menu:split-right')
+            },
+            { type: 'separator' },
             { role: 'front' }
           ]
-        : [{ role: 'minimize' }, { role: 'close' }]
+        : [
+            { role: 'minimize' },
+            {
+              label: 'Split Right',
+              accelerator: 'CmdOrCtrl+\\',
+              click: () => sendToRenderer('menu:split-right')
+            },
+            { role: 'close' }
+          ]
   }
 
   template.push(fileMenu, editMenu, searchMenu, viewMenu, windowMenu)

@@ -136,6 +136,7 @@ export interface LogEditorApi {
   onMenuSaveFile(listener: () => void): RemoveListener
   onMenuSaveFileAs(listener: () => void): RemoveListener
   onMenuCloseTab(listener: () => void): RemoveListener
+  onMenuSplitRight(listener: () => void): RemoveListener
   onSearchResults(listener: (payload: SearchResponsePayload) => void): RemoveListener
   onSearchNavigate(listener: (payload: { tabId: string; line: number; column?: number }) => void): RemoveListener
   onSearchContext(listener: (payload: ActiveContext) => void): RemoveListener

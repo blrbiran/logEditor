@@ -42,7 +42,6 @@ type UseTabsControllerResult = {
   openFilesFromContent(files: OpenedFile[]): void
   switchTab(tabId: string): void
   closeTab(tabId: string): void
-  closeActiveTab(): void
   updateTabContent(tabId: string, content: string): void
   handleSave(forceSaveAs: boolean): Promise<void>
   handleSearchResultSelect(result: SearchResultItem, match: SearchMatch): void
@@ -495,20 +494,6 @@ export const useTabsController = (): UseTabsControllerResult => {
     )
   }, [enqueueTabStateSync])
 
-  const closeActiveTab = useCallback(() => {
-    const currentId = activeTabIdRef.current
-    if (!currentId) {
-      debugLog('closeActiveTab skipped: no active tab')
-      return
-    }
-    const currentTab = tabsRef.current.find((tab) => tab.id === currentId)
-    if (!currentTab) {
-      debugLog('closeActiveTab skipped: missing tab', currentId)
-      return
-    }
-    closeTab(currentId)
-  }, [closeTab])
-
   const handleSave = useCallback(
     async (forceSaveAs: boolean) => {
       const currentTab = tabsRef.current.find(
@@ -946,14 +931,13 @@ export const useTabsController = (): UseTabsControllerResult => {
       api.onMenuOpenFile(() => openFiles()),
       api.onMenuSaveFile(() => void handleSave(false)),
       api.onMenuSaveFileAs(() => void handleSave(true)),
-      api.onMenuCloseTab(() => closeActiveTab()),
       api.onSearchResults((payload: SearchResponsePayload) => handleSearchResults(payload))
     ]
 
     return () => {
       disposers.forEach((dispose) => dispose())
     }
-  }, [closeActiveTab, createNewTab, handleSave, handleSearchResults, openFiles, updateActiveTab])
+  }, [createNewTab, handleSave, handleSearchResults, openFiles, updateActiveTab])
 
   return {
     tabs,
@@ -967,7 +951,6 @@ export const useTabsController = (): UseTabsControllerResult => {
     openFilesFromContent,
     switchTab,
     closeTab,
-    closeActiveTab,
     updateTabContent,
     handleSave,
     handleSearchResultSelect,
