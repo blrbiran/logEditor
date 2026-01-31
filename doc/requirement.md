@@ -1,6 +1,6 @@
 # LogEditor Requirement
 
-LogEditor 是一款基于 Electron + React + Tailwind CSS + TypeScript + electron-vite 的桌面日志查看与编辑工具，具备多标签、跨标签搜索与大文件滑窗编辑能力。本文档同步到 `main` 分支 commit `6dd95a6`，覆盖了提交 `4140507` 至 `6dd95a6` 引入的“大文件窗口化 + 自定义滚动条”系列改动。遵循此文档即可由 LLM 或人工复刻完整项目。
+LogEditor 是一款基于 Electron + React + Tailwind CSS + TypeScript + electron-vite 的桌面日志查看与编辑工具，具备多标签、跨标签搜索与大文件滑窗编辑能力。本文档同步到 `main` 分支 commit `3eed02f`，覆盖了提交 `4140507` 至 `3eed02f` 引入的“大文件窗口化 + 自定义滚动条 + 拖拽路径解析增强”系列改动。遵循此文档即可由 LLM 或人工复刻完整项目。
 
 ---
 
@@ -197,6 +197,7 @@ tests/
   - 状态：`syncTabState`、`removeTabState`、`disposeSearchResults`、`updateActiveContext`、`focusMainWindow`、`openSearchWindow`。
   - 监听：`onMenu*`、`onSearchResults`、`onSearchNavigate`、`onSearchContext`。
 - 暴露 `window.electron.path.basename`，供渲染端在无 `filePath` 的情况下构造标题。
+- 在 context isolation 下额外通过 `window.electron.webUtils.getPathForFile` 代理原生拖拽文件路径，保证 Finder 拖放可获取真实 `filePath` 并与 “Open…” 菜单行为一致。
 - 若 `contextIsolation` 关闭，则退回到 `window.electron`/`window.api` 兼容模式。
 - `env.d.ts` re-export `src/common/ipc.ts` 中的所有类型，React 组件直接 `import type { ... } from '@renderer/env'`。
 
@@ -244,11 +245,14 @@ tests/
 - 大文件 banner：
   - 仅在 `tab.isWindowed === false && tab.isTruncated === true` 时显示 read-only 横幅，包含字节/行统计与 “Load next chunk” 按钮。
   - 启用滑窗 (`tab.isWindowed === true`) 后隐藏横幅，窗口切换由滚动位置与 `WindowedScrollBar` 驱动。
+- 标签栏关闭按钮：
+  - 使用 `span` + `role="button"` + `tabIndex=0` 代替嵌套 `<button>`，既避免 HTML 语义冲突/水合报错，又在 Enter/Space 时调用 `closeTab` 并 `stopPropagation()`，防止误切换标签。
 - 自定义滚动条：
   - `WindowedScrollBar` 被复用两次：滑窗模式显示文件窗口范围，普通模式与 textarea 滚动进度同步。
   - 当 textarea 滚动到 95% 以上且仍有 `hasMore` 时自动触发 `loadMoreContent`；顶部 5% 会尝试向前加载窗口。
 - 拖拽：
   - `collectDroppedFilePaths` 支持 `text/uri-list`、`text/plain`、`dataTransfer.files`；若缺乏路径则 `readFilesFromBlobs` 读取 blob 文本。
+  - `resolveDroppedFilePath` 先读取 Electron `File.path`，若在 context isolation 下失效则调用 `window.electron.webUtils.getPathForFile(file)` 复原真实路径，避免 Finder 拖拽 fallback 到 blob 导致大文件进入只读模式。
 - 搜索联动：
   - 监听 `api.onSearchNavigate`，在跳转前调用 `ensureLineVisible`。
   - `SearchResultsPanel` 始终保持 `opacity:1`（MutationObserver 强制）。
