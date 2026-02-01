@@ -125,7 +125,7 @@ tests/
 - `File` 菜单通过 `sendToRenderer` 分发 `menu:new-file|open-file|save-file|save-file-as|close-tab`。
 - `Search › Find…` 调用 `openSearchWindow()`。
 - `View` 内根据 `is.dev` 在 `reload` 与 `forceReload` 间切换，保留 `toggleDevTools`。
-- `Window` 菜单在 macOS 下包含 `front`、`Zoom` 等额外条目。
+- `Window` 菜单在 macOS 下包含 `front`、`Zoom` 等额外条目，并统一暴露 `Split Right (CmdOrCtrl+\)`，通过 `sendToRenderer('menu:split-right')` 指示渲染进程按 VS Code 风格拆分当前编辑器。
 
 ### 6.4 文件读取与滑窗编辑（`src/main/ipc.ts`）
 
@@ -195,7 +195,7 @@ tests/
   - 文件：`openFileDialog`、`readFilesFromPaths`、`readFileRange`、`applyWindowEdit`、`saveFileDialog`。
   - 搜索：`performSearch`、`emitSearchResults`、`emitNavigateToLine`。
   - 状态：`syncTabState`、`removeTabState`、`disposeSearchResults`、`updateActiveContext`、`focusMainWindow`、`openSearchWindow`。
-  - 监听：`onMenu*`、`onSearchResults`、`onSearchNavigate`、`onSearchContext`。
+  - 监听：`onMenu*`（当前包括 `new-file/open-file/save-file/save-file-as/close-tab/split-right`）、`onSearchResults`、`onSearchNavigate`、`onSearchContext`。
 - 暴露 `window.electron.path.basename`，供渲染端在无 `filePath` 的情况下构造标题。
 - 在 context isolation 下额外通过 `window.electron.webUtils.getPathForFile` 代理原生拖拽文件路径，保证 Finder 拖放可获取真实 `filePath` 并与 “Open…” 菜单行为一致。
 - 若 `contextIsolation` 关闭，则退回到 `window.electron`/`window.api` 兼容模式。
@@ -231,11 +231,18 @@ tests/
     - 窗口模式：替换 `content`，更新 `lineWindowStart`、`loadedRange`，并阻止在 `hasWindowEdits === true` 时切窗。
   - `jumpToFilePosition(tabId, ratio)`：配合滚动条跳转至文件任意位置。
   - `openFilesFromPaths`/`openFilesFromContent` 支持拖拽 blob，必要时通过 `readFilesFromBlobs` 读取文本。
-  - 自动菜单绑定：`onMenuNewFile/open/save/saveAs/closeTab`，组件卸载时删除所有搜索缓存。
+  - 自动菜单绑定：`onMenuNewFile/open/save/saveAs`，组件卸载时删除所有搜索缓存（`close-tab` 与 `split-right` 事件由 `TabManager` 根据当前分栏状态单独处理）。
 - `api.updateActiveContext` 在 `activeTab` 变化时更新主进程 `activeContext`，供搜索窗口了解 scope。
 
 ### 8.3 `TabManager` 组件（`components/TabManager.tsx`）
 
+- VS Code 风格的分栏：
+  - 维护 `SplitLayoutState = { panes: PaneState[]; focusedPaneId }`，`PaneState` 追踪 `tabIds`、`activeTabId` 与宽度比例，保证任意标签可在左右 pane 间拖拽或复制视图。
+  - `Window ▸ Split Right (CmdOrCtrl+\)` 与标签右键菜单的 “Split Right” 都触发同一 `menu:split-right` 流程，自动在右侧 pane 打开当前/指定标签；首次拆分强制 50/50 宽度。
+  - `File ▸ Close Tab`（或 `CmdOrCtrl+W`）、标签 `×`、右键菜单 “Close Tab” 均只关闭当前 pane 下的视图；如果该标签在其他 pane 仍存在则保持打开。
+  - 分栏之间共享底层 `Tab` 数据，但滚动位置、行号视图、WindowedScrollbar 等按 `paneId::tabId` 组合键独立维护，确保同一文件在多 pane 中互不干扰。
+  - 每个 pane 顶部的标签条支持拖拽重排/跨 pane 拖放，新建标签按钮、空白双击等操作会将 `pendingInsertionPane` 设置为目标 pane。
+  - 标签右键菜单使用自定义 overlay（点击空白或按 Esc 关闭），并与拖拽/分栏 resize 等交互互斥以避免幽灵菜单。
 - 维护多组 `ref`：
   - `editorRefs`, `highlightRefs`, `lineViewportRef`, `pendingScrollRatioRef`, `autoScrollIntentRef`。
   - `lineViewport` 通过 `requestAnimationFrame` 与 textarea 的滚动事件实时估算首行、偏移、可视行数（最多渲染 400 个行号）。
