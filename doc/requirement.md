@@ -251,6 +251,7 @@ tests/
 - 自定义行号与高亮：
   - `estimateLineNumberGutterWidth` 根据 `lineCount` 增加 gutter 宽度（最大 160px）。
   - `focusLine(tabId, line, column)` 负责滚动居中并在 2 秒后淡出高亮。
+  - 软换行场景下根据 textarea 的可见宽度/字符宽度估算 wrap，每个视觉行只在第一段显示行号，其余 wrap 段显示空白，效果与 VS Code 保持一致。
 - 大文件 banner：
   - 仅在 `tab.isWindowed === false && tab.isTruncated === true` 时显示 read-only 横幅，包含字节/行统计与 “Load next chunk” 按钮。
   - 启用滑窗 (`tab.isWindowed === true`) 后隐藏横幅，窗口切换由滚动位置与 `WindowedScrollBar` 驱动。

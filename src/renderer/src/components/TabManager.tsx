@@ -233,6 +233,27 @@ const readFilesFromBlobs = async (files: File[]): Promise<OpenedFile[]> => {
   return results.filter((entry): entry is OpenedFile => entry !== null)
 }
 
+const MEASURE_CHAR = '0'
+const getCharWidth = (() => {
+  let canvas: HTMLCanvasElement | null = null
+  let context: CanvasRenderingContext2D | null = null
+  return (font: string): number => {
+    if (typeof document === 'undefined') {
+      return 8
+    }
+    if (!canvas) {
+      canvas = document.createElement('canvas')
+      context = canvas.getContext('2d')
+    }
+    if (!context) {
+      return 8
+    }
+    context.font = font
+    const metrics = context.measureText(MEASURE_CHAR)
+    return metrics.width || 8
+  }
+})()
+
 function TabManager(): React.JSX.Element {
   type LineViewportState = {
     firstLine: number
@@ -240,6 +261,9 @@ function TabManager(): React.JSX.Element {
     visibleLines: number
     lineHeight: number
     paddingTop: number
+    charWidth: number
+    contentWidth: number
+    maxCharsPerLine: number
   }
 
   type ScrollMetrics = {
@@ -287,11 +311,15 @@ function TabManager(): React.JSX.Element {
     offset: 0,
     visibleLines: MAX_RENDERED_LINE_NUMBERS,
     lineHeight: 24,
-    paddingTop: 0
+    paddingTop: 0,
+    charWidth: 8,
+    contentWidth: 0,
+    maxCharsPerLine: Number.POSITIVE_INFINITY
   }
   const highlightInfoRef = useRef<Record<string, { line: number }>>({})
   const highlightTimeoutRef = useRef<Record<string, number>>({})
   const standardScrollMetricsRef = useRef<Record<string, ScrollMetrics>>({})
+  const sessionLinesCacheRef = useRef<Record<string, { content: string; lines: string[] }>>({})
 
   const {
     tabs,
@@ -451,6 +479,7 @@ function TabManager(): React.JSX.Element {
     pruneRecord(highlightInfoRef.current)
     pruneRecord(highlightTimeoutRef.current)
     pruneRecord(standardScrollMetricsRef.current)
+    pruneRecord(sessionLinesCacheRef.current)
     const previousKeys = mountedViewKeysRef.current
     const addedKeys = Array.from(validKeys).filter((key) => !previousKeys.has(key))
     const removedKeys = Array.from(previousKeys).filter((key) => !validKeys.has(key))
@@ -501,16 +530,31 @@ function TabManager(): React.JSX.Element {
         const styles = getComputedStyle(textarea)
         const lineHeight = parseFloat(styles.lineHeight || '20') || 20
         const paddingTop = parseFloat(styles.paddingTop || '0') || 0
+        const paddingLeft = parseFloat(styles.paddingLeft || '0') || 0
+        const paddingRight = parseFloat(styles.paddingRight || '0') || 0
         const scrollTop = textarea.scrollTop
         const firstLine = Math.max(1, Math.floor((scrollTop + paddingTop) / lineHeight) + 1)
         const offset = scrollTop + paddingTop - (firstLine - 1) * lineHeight
         const visibleLines = Math.max(1, Math.ceil(textarea.clientHeight / lineHeight) + 4)
+        const contentWidth = Math.max(1, textarea.clientWidth - paddingLeft - paddingRight)
+        const fontStyle = styles.fontStyle || 'normal'
+        const fontVariant = styles.fontVariant || 'normal'
+        const fontWeight = styles.fontWeight || '400'
+        const fontSize = styles.fontSize || '14px'
+        const fontFamily = styles.fontFamily || 'monospace'
+        const font = `${fontStyle} ${fontVariant} ${fontWeight} ${fontSize} ${fontFamily}`.trim()
+        const charWidth = getCharWidth(font)
+        const maxCharsPerLine =
+          charWidth > 0 ? Math.max(1, Math.floor(contentWidth / charWidth)) : Number.POSITIVE_INFINITY
         lineViewportRef.current[viewKey] = {
           firstLine,
           offset,
           visibleLines,
           lineHeight,
-          paddingTop
+          paddingTop,
+          charWidth,
+          contentWidth,
+          maxCharsPerLine
         }
         updateStandardScrollMetrics(viewKey, textarea)
         forceLineViewportRender((value) => value + 1)
@@ -518,6 +562,82 @@ function TabManager(): React.JSX.Element {
       })
     },
     [updateStandardScrollMetrics]
+  )
+
+  type LineNumberEntry = {
+    lineNumber: number
+    displayText: string
+  }
+
+  const getSessionLinesForView = useCallback(
+    (viewKey: string, content: string): string[] => {
+      const cached = sessionLinesCacheRef.current[viewKey]
+      if (cached && cached.content === content) {
+        return cached.lines
+      }
+      const lines = content.split(/\r?\n/)
+      sessionLinesCacheRef.current[viewKey] = { content, lines }
+      return lines
+    },
+    []
+  )
+
+  const buildLineNumberEntries = useCallback(
+    ({
+      sessionLines,
+      startVisualLine,
+      count,
+      windowStartLine,
+      maxCharsPerLine
+    }: {
+      sessionLines: string[]
+      startVisualLine: number
+      count: number
+      windowStartLine: number
+      maxCharsPerLine: number
+    }): LineNumberEntry[] => {
+      const entries: LineNumberEntry[] = []
+      if (!Number.isFinite(maxCharsPerLine) || maxCharsPerLine <= 0) {
+        for (let index = 0; index < count; index += 1) {
+          const lineNumber = windowStartLine + startVisualLine - 1 + index
+          entries.push({
+            lineNumber,
+            displayText: lineNumber.toLocaleString()
+          })
+        }
+        return entries
+      }
+      const effectiveMaxChars = Math.max(1, Math.floor(maxCharsPerLine))
+      let visualIndex = 1
+      let globalLineNumber = windowStartLine
+      for (let lineIndex = 0; lineIndex < sessionLines.length && entries.length < count; lineIndex += 1) {
+        const lineText = sessionLines[lineIndex] ?? ''
+        const effectiveLength = lineText.length === 0 ? 1 : lineText.length
+        const wraps = Math.max(1, Math.ceil(effectiveLength / effectiveMaxChars))
+        for (let wrapIndex = 0; wrapIndex < wraps; wrapIndex += 1) {
+          if (visualIndex >= startVisualLine && entries.length < count) {
+            entries.push({
+              lineNumber: globalLineNumber,
+              displayText: wrapIndex === 0 ? globalLineNumber.toLocaleString() : ''
+            })
+          }
+          if (entries.length === count) {
+            break
+          }
+          visualIndex += 1
+        }
+        globalLineNumber += 1
+      }
+      while (entries.length < count) {
+        const nextLineNumber = windowStartLine + startVisualLine - 1 + entries.length
+        entries.push({
+          lineNumber: nextLineNumber,
+          displayText: nextLineNumber.toLocaleString()
+        })
+      }
+      return entries
+    },
+    []
   )
 
   const focusLine = useCallback(
@@ -1359,13 +1479,17 @@ function TabManager(): React.JSX.Element {
         1,
         Math.min(viewport.visibleLines, effectiveRemaining, MAX_RENDERED_LINE_NUMBERS)
       )
-      const lineNumbers = Array.from({ length: lineRenderCount }, (_, index) => safeFirstLine + index)
-      const displayLineNumbers = lineNumbers.map((lineNumber) => {
-        const globalLineNumber = windowStartLine + lineNumber - 1
-        if (knownLineCount > 0) {
-          return Math.max(1, Math.min(globalLineNumber, knownLineCount))
-        }
-        return Math.max(1, globalLineNumber)
+      const sessionLines = getSessionLinesForView(viewKey, sessionContent)
+      const effectiveMaxChars =
+        Number.isFinite(viewport.maxCharsPerLine) && viewport.maxCharsPerLine > 0
+          ? viewport.maxCharsPerLine
+          : Number.POSITIVE_INFINITY
+      const lineNumberEntries = buildLineNumberEntries({
+        sessionLines,
+        startVisualLine: safeFirstLine,
+        count: lineRenderCount,
+        windowStartLine,
+        maxCharsPerLine: effectiveMaxChars
       })
       const disableWindowShift = sessionIsLoading || sessionIsDirty
       const lineNumberGutterWidth = estimateLineNumberGutterWidth(tab, session)
@@ -1436,16 +1560,16 @@ function TabManager(): React.JSX.Element {
                   paddingTop: `${viewport.paddingTop}px`
                 }}
               >
-                {displayLineNumbers.map((globalLineNumber) => (
+                {lineNumberEntries.map((entry, index) => (
                   <span
-                    key={`${tab.id}-line-${globalLineNumber}`}
+                    key={`${tab.id}-line-${entry.lineNumber}-${index}`}
                     className="block"
                     style={{
                       height: `${viewport.lineHeight}px`,
                       lineHeight: `${viewport.lineHeight}px`
                     }}
                   >
-                    {globalLineNumber.toLocaleString()}
+                    {entry.displayText && entry.displayText.length > 0 ? entry.displayText : '\u00A0'}
                   </span>
                 ))}
               </div>
@@ -1460,8 +1584,8 @@ function TabManager(): React.JSX.Element {
                       initialScrollAppliedRef.current[viewKey] = true
                     }
                     updateStandardScrollMetrics(viewKey, el)
-                scheduleLineViewportUpdate(viewKey, el)
-              }}
+                    scheduleLineViewportUpdate(viewKey, el)
+                  }}
               value={sessionContent}
               onChange={(event) => updateTabContent(tab.id, event.target.value, viewKey)}
               onDragOver={createExternalDragOverHandler(paneId)}
@@ -1482,7 +1606,7 @@ function TabManager(): React.JSX.Element {
               </div>
               <div className="ml-2 flex h-full items-stretch gap-2">
                 <Minimap
-                  content={tab.content}
+                  content={sessionContent}
                   startRatio={tab.isWindowed ? chunkStartRatio : standardScrollStart}
                   endRatio={tab.isWindowed ? chunkEndRatio : standardScrollEnd}
                   disabled={tab.isWindowed ? disableWindowShift : standardScrollDisabled}
