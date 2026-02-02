@@ -11,7 +11,16 @@ import type {
   FileRangePayload
 } from '@renderer/env'
 import { buildDefaultFilename, clamp, generateTabId } from './helpers'
-import { WELCOME_TAB_ID, isFileTab, isSearchTab, type FileTab, type SearchTab, type Tab, type WelcomeTab } from './tab-types'
+import {
+  WELCOME_TAB_ID,
+  isFileTab,
+  isSearchTab,
+  type FileTab,
+  type SearchTab,
+  type Tab,
+  type WelcomeTab,
+  type WindowSessionState
+} from './tab-types'
 import { buildSearchTabTitle } from './search-utils'
 import { countLines, countLinesForAppend } from '@renderer/utils/text-metrics'
 
@@ -22,6 +31,152 @@ const textEncoder = new TextEncoder()
 
 const getByteLength = (value: string): number => textEncoder.encode(value).length
 const LARGE_FILE_SYNC_THRESHOLD_BYTES = 8 * 1024 * 1024
+const PRIMARY_VIEW_KEY = '__primary__'
+const SCROLL_EPSILON = 0.000001
+
+const getViewKeyTabId = (viewKey: string | null): string | null => {
+  if (!viewKey) {
+    return null
+  }
+  const [, tabId] = viewKey.split('::')
+  return tabId ?? null
+}
+
+const snapshotSession = (tab: FileTab): WindowSessionState => ({
+  content: tab.content,
+  loadedRange: tab.loadedRange,
+  lineWindowStart: tab.lineWindowStart,
+  loadedLineCount: tab.loadedLineCount,
+  isLoadingMore: tab.isLoadingMore,
+  isDirty: tab.isDirty,
+  isReadOnly: tab.isReadOnly,
+  hasWindowEdits: tab.hasWindowEdits
+})
+
+const getSessionKey = (viewKey?: string | null): string =>
+  viewKey && viewKey.length > 0 ? viewKey : PRIMARY_VIEW_KEY
+
+const cloneSessions = (sessions: Record<string, WindowSessionState> | undefined): Record<string, WindowSessionState> =>
+  sessions ? { ...sessions } : {}
+
+const ensureSessionContainer = (tab: FileTab): Record<string, WindowSessionState> => {
+  const existing = cloneSessions(tab.windowSessions)
+  if (!existing[PRIMARY_VIEW_KEY]) {
+    existing[PRIMARY_VIEW_KEY] = snapshotSession(tab)
+  }
+  return existing
+}
+
+const computeSessionAggregates = (
+  sessions: Record<string, WindowSessionState>
+): { isDirty: boolean; hasWindowEdits: boolean } => {
+  const values = Object.values(sessions)
+  return {
+    isDirty: values.some((session) => session.isDirty),
+    hasWindowEdits: values.some((session) => session.hasWindowEdits)
+  }
+}
+
+const selectBaseSession = (
+  sessions: Record<string, WindowSessionState>,
+  activeViewKey: string | null
+): WindowSessionState => {
+  if (activeViewKey && sessions[activeViewKey]) {
+    return sessions[activeViewKey]
+  }
+  return sessions[PRIMARY_VIEW_KEY]
+}
+
+const writeSessionState = (
+  tab: FileTab,
+  viewKey: string | null | undefined,
+  nextSession: WindowSessionState,
+  activeViewKey: string | null
+): FileTab => {
+  const key = getSessionKey(viewKey)
+  const sessions = ensureSessionContainer(tab)
+  sessions[key] = nextSession
+  const baseSession = selectBaseSession(sessions, activeViewKey)
+  const aggregates = computeSessionAggregates(sessions)
+  return {
+    ...tab,
+    content: baseSession.content,
+    loadedRange: baseSession.loadedRange,
+    lineWindowStart: baseSession.lineWindowStart,
+    loadedLineCount: baseSession.loadedLineCount,
+    isLoadingMore: baseSession.isLoadingMore,
+    isDirty: aggregates.isDirty,
+    isReadOnly: baseSession.isReadOnly,
+    hasWindowEdits: aggregates.hasWindowEdits,
+    windowSessions: sessions
+  }
+}
+
+const updateSessionState = (
+  tab: FileTab,
+  viewKey: string | null | undefined,
+  activeViewKey: string | null,
+  updater: (session: WindowSessionState) => WindowSessionState
+): FileTab => {
+  const key = getSessionKey(viewKey)
+  const sessions = ensureSessionContainer(tab)
+  const current = sessions[key] ?? sessions[PRIMARY_VIEW_KEY]
+  const nextSession = updater(current)
+  sessions[key] = nextSession
+  const baseSession = selectBaseSession(sessions, activeViewKey)
+  const aggregates = computeSessionAggregates(sessions)
+  return {
+    ...tab,
+    content: baseSession.content,
+    loadedRange: baseSession.loadedRange,
+    lineWindowStart: baseSession.lineWindowStart,
+    loadedLineCount: baseSession.loadedLineCount,
+    isLoadingMore: baseSession.isLoadingMore,
+    isDirty: aggregates.isDirty,
+    isReadOnly: baseSession.isReadOnly,
+    hasWindowEdits: aggregates.hasWindowEdits,
+    windowSessions: sessions
+  }
+}
+
+const removeSessionState = (
+  tab: FileTab,
+  viewKey: string,
+  activeViewKey: string | null
+): FileTab => {
+  const key = getSessionKey(viewKey)
+  const sessions = ensureSessionContainer(tab)
+  if (!sessions[key] || key === PRIMARY_VIEW_KEY) {
+    return tab
+  }
+  delete sessions[key]
+  const baseSession = selectBaseSession(sessions, activeViewKey)
+  const aggregates = computeSessionAggregates(sessions)
+  const remaining = Object.keys(sessions).length ? sessions : undefined
+  return {
+    ...tab,
+    content: baseSession.content,
+    loadedRange: baseSession.loadedRange,
+    lineWindowStart: baseSession.lineWindowStart,
+    loadedLineCount: baseSession.loadedLineCount,
+    isLoadingMore: baseSession.isLoadingMore,
+    isDirty: aggregates.isDirty,
+    isReadOnly: baseSession.isReadOnly,
+    hasWindowEdits: aggregates.hasWindowEdits,
+    windowSessions: remaining
+  }
+}
+
+const getSessionState = (tab: FileTab, viewKey?: string | null): WindowSessionState => {
+  const key = getSessionKey(viewKey)
+  if (tab.windowSessions?.[key]) {
+    return tab.windowSessions[key]
+  }
+  if (tab.windowSessions?.[PRIMARY_VIEW_KEY]) {
+    return tab.windowSessions[PRIMARY_VIEW_KEY]
+  }
+  return snapshotSession(tab)
+}
 
 const createWelcomeTab = (isActive: boolean): WelcomeTab => ({
   kind: 'welcome',
@@ -42,12 +197,15 @@ type UseTabsControllerResult = {
   openFilesFromContent(files: OpenedFile[]): void
   switchTab(tabId: string): void
   closeTab(tabId: string): void
-  updateTabContent(tabId: string, content: string): void
+  updateTabContent(tabId: string, content: string, viewKey?: string): void
   handleSave(forceSaveAs: boolean): Promise<void>
   handleSearchResultSelect(result: SearchResultItem, match: SearchMatch): void
-  loadMoreContent(tabId: string, direction?: 'forward' | 'backward'): Promise<void>
-  jumpToFilePosition(tabId: string, ratio: number): Promise<void>
-  ensureLineVisible(tabId: string, line: number): Promise<void>
+  loadMoreContent(tabId: string, direction?: 'forward' | 'backward', viewKey?: string): Promise<void>
+  jumpToFilePosition(tabId: string, ratio: number, viewKey?: string): Promise<void>
+  ensureLineVisible(tabId: string, line: number, viewKey?: string): Promise<void>
+  registerViewSession(tabId: string, viewKey: string): void
+  releaseViewSession(tabId: string, viewKey: string): void
+  setActiveViewSession(viewKey: string | null): void
 }
 
 const debugLog = (...args: unknown[]): void => {
@@ -57,30 +215,38 @@ const debugLog = (...args: unknown[]): void => {
   }
 }
 
-const buildWindowedTabState = (tab: FileTab, range: FileRangePayload): FileTab => {
+const buildWindowedTabState = (
+  tab: FileTab,
+  range: FileRangePayload,
+  options: { viewKey?: string | null; activeViewKey: string | null }
+): FileTab => {
   const chunkLineCount = range.lineCount ?? countLines(range.content)
-  const startLine = Math.max(1, range.startLine ?? tab.lineWindowStart)
+  const session = getSessionState(tab, options.viewKey)
+  const startLine = Math.max(1, range.startLine ?? session.lineWindowStart)
   const windowEndLine = startLine + Math.max(0, chunkLineCount - 1)
   const previousTotal = tab.lineCount ?? 0
   const reachedFileEnd = !range.hasMore && range.end >= range.totalSize
-  const hasAuthoritativeTotal = previousTotal > tab.loadedLineCount
+  const hasAuthoritativeTotal = previousTotal > session.loadedLineCount
   const shouldLockTotal = hasAuthoritativeTotal && !reachedFileEnd
   const nextTotalLineCount = shouldLockTotal
     ? previousTotal
     : Math.max(previousTotal, windowEndLine)
   const windowed = range.start > 0 || range.end < range.totalSize
-  return {
-    ...tab,
+  const nextSession: WindowSessionState = {
+    ...session,
     content: range.content,
-    size: range.totalSize,
     loadedRange: { start: range.start, end: range.end },
     loadedLineCount: chunkLineCount,
     lineWindowStart: startLine,
+    isLoadingMore: false
+  }
+  const updated = writeSessionState(tab, options.viewKey, nextSession, options.activeViewKey)
+  return {
+    ...updated,
+    size: range.totalSize,
     lineCount: nextTotalLineCount,
     isTruncated: windowed || tab.isTruncated,
-    isWindowed: windowed,
-    isLoadingMore: false,
-    hasWindowEdits: false
+    isWindowed: windowed || tab.isWindowed
   }
 }
 
@@ -90,6 +256,8 @@ export const useTabsController = (): UseTabsControllerResult => {
 
   const tabsRef = useRef<Tab[]>([createWelcomeTab(true)])
   const activeTabIdRef = useRef<string | null>(WELCOME_TAB_ID)
+  const activeViewKeyRef = useRef<string | null>(null)
+  const activeViewTabIdRef = useRef<string | null>(null)
   const activationStackRef = useRef<string[]>([WELCOME_TAB_ID])
   const untitledCounterRef = useRef<number>(1)
   const pendingSyncMapRef = useRef<Map<string, SearchableTab>>(new Map())
@@ -128,6 +296,11 @@ export const useTabsController = (): UseTabsControllerResult => {
     activeTabIdRef.current = activeTabId
   }, [activeTabId])
 
+  const setActiveViewSession = useCallback((viewKey: string | null) => {
+    activeViewKeyRef.current = viewKey
+    activeViewTabIdRef.current = getViewKeyTabId(viewKey)
+  }, [])
+
   const updateActiveTab = useCallback((id: string | null) => {
     debugLog('updateActiveTab', id)
     setActiveTabId(id)
@@ -136,6 +309,32 @@ export const useTabsController = (): UseTabsControllerResult => {
       activationStackRef.current = activationStackRef.current.filter((tabId) => tabId !== id)
       activationStackRef.current.push(id)
     }
+  }, [])
+
+  const registerViewSession = useCallback((tabId: string, viewKey: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== tabId || !isFileTab(tab) || !tab.isWindowed) {
+          return tab
+        }
+        if (tab.windowSessions?.[viewKey]) {
+          return tab
+        }
+        const baseSnapshot = { ...getSessionState(tab) }
+        return writeSessionState(tab, viewKey, baseSnapshot, activeViewKeyRef.current)
+      })
+    )
+  }, [])
+
+  const releaseViewSession = useCallback((tabId: string, viewKey: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== tabId || !isFileTab(tab) || !tab.windowSessions?.[viewKey]) {
+          return tab
+        }
+        return removeSessionState(tab, viewKey, activeViewKeyRef.current)
+      })
+    )
   }, [])
 
   useEffect(() => {
@@ -452,41 +651,51 @@ export const useTabsController = (): UseTabsControllerResult => {
     }
   }, [updateActiveTab])
 
-  const updateTabContent = useCallback((tabId: string, content: string) => {
-    debugLog('updateTabContent', { tabId, length: content.length })
+  const updateTabContent = useCallback((tabId: string, content: string, viewKey?: string) => {
+    debugLog('updateTabContent', { tabId, viewKey, length: content.length })
     setTabs((prev) =>
       prev.map((tab) => {
         if (tab.id !== tabId || !isFileTab(tab)) {
           return tab
         }
-        if (tab.isReadOnly) {
+        const session = getSessionState(tab, viewKey)
+        if (session.isReadOnly) {
           debugLog('updateTabContent skipped (read-only tab)', tabId)
           return tab
         }
         const totalLineCount = countLines(content)
         if (tab.isWindowed) {
-          const lineDelta = totalLineCount - tab.loadedLineCount
-          const updatedTab: FileTab = {
-            ...tab,
+          const lineDelta = totalLineCount - session.loadedLineCount
+          const nextSession: WindowSessionState = {
+            ...session,
             content,
-            isDirty: true,
             loadedLineCount: totalLineCount,
-            lineCount: Math.max(1, tab.lineCount + lineDelta),
+            isDirty: true,
             hasWindowEdits: true
+          }
+          const result = writeSessionState(tab, viewKey, nextSession, activeViewKeyRef.current)
+          const updatedTab: FileTab = {
+            ...result,
+            lineCount: Math.max(1, tab.lineCount + lineDelta)
           }
           enqueueTabStateSync(updatedTab)
           return updatedTab
         }
-        const updatedTab: FileTab = {
-          ...tab,
+        const baseSession: WindowSessionState = {
+          ...session,
           content,
-          size: content.length,
           loadedRange: { start: 0, end: content.length },
-          isTruncated: false,
-          isDirty: true,
-          lineCount: totalLineCount,
           loadedLineCount: totalLineCount,
+          isDirty: true,
+          isReadOnly: false,
           hasWindowEdits: false
+        }
+        const result = writeSessionState(tab, viewKey, baseSession, activeViewKeyRef.current)
+        const updatedTab: FileTab = {
+          ...result,
+          size: content.length,
+          lineCount: totalLineCount,
+          isTruncated: false
         }
         enqueueTabStateSync(updatedTab)
         return updatedTab
@@ -505,13 +714,23 @@ export const useTabsController = (): UseTabsControllerResult => {
       }
 
       if (currentTab.isWindowed && currentTab.filePath) {
+        const activeViewKey =
+          activeViewTabIdRef.current === currentTab.id ? activeViewKeyRef.current : null
+        const sessionSnapshot = getSessionState(currentTab, activeViewKey)
         const applyWindowChanges = async (targetPath: string, updateTitle: boolean) => {
-          const replacementLength = getByteLength(currentTab.content)
+          const latest = tabsRef.current.find(
+            (tab): tab is FileTab => tab.id === currentTab.id && isFileTab(tab)
+          )
+          const sessionForWrite = latest
+            ? getSessionState(latest, activeViewKey)
+            : getSessionState(currentTab, activeViewKey)
+          const replacementLength = getByteLength(sessionForWrite.content)
+          const rangeStart = sessionForWrite.loadedRange.start
           const result = await api.applyWindowEdit({
             filePath: targetPath,
-            rangeStart: currentTab.loadedRange.start,
-            rangeEnd: currentTab.loadedRange.end,
-            replacement: currentTab.content
+            rangeStart,
+            rangeEnd: sessionForWrite.loadedRange.end,
+            replacement: sessionForWrite.content
           })
           const nextTitle = updateTitle ? window.electron.path.basename(targetPath) : currentTab.title
           debugLog('handleSave window patch applied', {
@@ -524,17 +743,28 @@ export const useTabsController = (): UseTabsControllerResult => {
               if (tab.id !== currentTab.id || !isFileTab(tab)) {
                 return tab
               }
-              const updatedTab: FileTab = {
-                ...tab,
-                filePath: targetPath,
-                title: nextTitle,
-                size: result.size,
+              const currentSession = getSessionState(tab, activeViewKey)
+              const nextSession: WindowSessionState = {
+                ...currentSession,
+                content: sessionForWrite.content,
                 loadedRange: {
-                  start: tab.loadedRange.start,
-                  end: tab.loadedRange.start + replacementLength
+                  start: rangeStart,
+                  end: rangeStart + replacementLength
                 },
                 isDirty: false,
                 hasWindowEdits: false
+              }
+              const baseApplied = writeSessionState(
+                tab,
+                activeViewKey,
+                nextSession,
+                activeViewKeyRef.current
+              )
+              const updatedTab: FileTab = {
+                ...baseApplied,
+                filePath: targetPath,
+                title: nextTitle,
+                size: result.size
               }
               enqueueTabStateSync(updatedTab)
               return updatedTab
@@ -552,7 +782,7 @@ export const useTabsController = (): UseTabsControllerResult => {
             debugLog('handleSave Save As canceled', result)
             return
           }
-          if (currentTab.isDirty) {
+          if (sessionSnapshot.isDirty) {
             await applyWindowChanges(result.filePath, true)
           } else {
             const newTitle = window.electron.path.basename(result.filePath)
@@ -574,7 +804,7 @@ export const useTabsController = (): UseTabsControllerResult => {
           return
         }
 
-        if (!currentTab.isDirty) {
+        if (!sessionSnapshot.isDirty) {
           debugLog('handleSave skipped: window has no changes', currentTab.id)
           return
         }
@@ -675,7 +905,7 @@ export const useTabsController = (): UseTabsControllerResult => {
   }, [updateActiveTab])
 
   const loadMoreContent = useCallback(
-    async (tabId: string, direction: 'forward' | 'backward' = 'forward') => {
+    async (tabId: string, direction: 'forward' | 'backward' = 'forward', viewKey?: string) => {
       const target = tabsRef.current.find(
         (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
       )
@@ -688,16 +918,17 @@ export const useTabsController = (): UseTabsControllerResult => {
         return
       }
       if (target.isWindowed) {
-        if (target.isDirty) {
+        const session = getSessionState(target, viewKey)
+        if (session.hasWindowEdits) {
           debugLog('loadMoreContent blocked: unsaved edits in window', tabId)
           throw new Error('Save or discard current edits before moving to another section.')
         }
 
-        if (direction === 'forward' && target.loadedRange.end >= target.size) {
+        if (direction === 'forward' && session.loadedRange.end >= target.size) {
           debugLog('loadMoreContent skipped: reached end of file', tabId)
           return
         }
-        if (direction === 'backward' && target.loadedRange.start === 0) {
+        if (direction === 'backward' && session.loadedRange.start === 0) {
           debugLog('loadMoreContent skipped: already at start', tabId)
           return
         }
@@ -705,10 +936,10 @@ export const useTabsController = (): UseTabsControllerResult => {
         setTabs((prev) =>
           prev.map((tab) =>
             tab.id === tabId && isFileTab(tab)
-              ? {
-                  ...tab,
+              ? updateSessionState(tab, viewKey, activeViewKeyRef.current, (sessionState) => ({
+                  ...sessionState,
                   isLoadingMore: true
-                }
+                }))
               : tab
           )
         )
@@ -718,9 +949,9 @@ export const useTabsController = (): UseTabsControllerResult => {
           const overlap = Math.min(target.windowOverlap, Math.floor(chunkSize / 4))
           const forwardStart = Math.min(
             target.size - chunkSize,
-            Math.max(target.loadedRange.end - overlap, target.loadedRange.start)
+            Math.max(session.loadedRange.end - overlap, session.loadedRange.start)
           )
-          const backwardStart = Math.max(0, target.loadedRange.start - (chunkSize - overlap))
+          const backwardStart = Math.max(0, session.loadedRange.start - (chunkSize - overlap))
           const nextStart = direction === 'forward' ? Math.max(0, forwardStart) : backwardStart
           const range = await api.readFileRange({
             filePath: target.filePath,
@@ -735,7 +966,10 @@ export const useTabsController = (): UseTabsControllerResult => {
             startLine: range.startLine,
             lineCount: range.lineCount
           })
-          const updatedTab = buildWindowedTabState(target, range)
+          const updatedTab = buildWindowedTabState(target, range, {
+            viewKey,
+            activeViewKey: activeViewKeyRef.current
+          })
           enqueueTabStateSync(updatedTab)
           setTabs((prev) =>
             prev.map((tab) => (tab.id === tabId && isFileTab(tab) ? updatedTab : tab))
@@ -744,10 +978,10 @@ export const useTabsController = (): UseTabsControllerResult => {
           setTabs((prev) =>
             prev.map((tab) =>
               tab.id === tabId && isFileTab(tab)
-                ? {
-                    ...tab,
+                ? updateSessionState(tab, viewKey, activeViewKeyRef.current, (sessionState) => ({
+                    ...sessionState,
                     isLoadingMore: false
-                  }
+                  }))
                 : tab
             )
           )
@@ -830,7 +1064,7 @@ export const useTabsController = (): UseTabsControllerResult => {
   )
 
   const jumpToFilePosition = useCallback(
-    async (tabId: string, ratio: number) => {
+    async (tabId: string, ratio: number, viewKey?: string) => {
       const target = tabsRef.current.find(
         (tab): tab is FileTab => tab.id === tabId && isFileTab(tab)
       )
@@ -842,7 +1076,8 @@ export const useTabsController = (): UseTabsControllerResult => {
         debugLog('jumpToFilePosition skipped: missing file path', tabId)
         return
       }
-      if (target.isDirty || target.isLoadingMore) {
+      const session = getSessionState(target, viewKey)
+      if (session.hasWindowEdits || session.isLoadingMore) {
         debugLog('jumpToFilePosition blocked: dirty or loading', tabId)
         return
       }
@@ -850,15 +1085,33 @@ export const useTabsController = (): UseTabsControllerResult => {
       const safeRatio = clamp(Number.isFinite(ratio) ? ratio : 0, 0, 1)
       const chunkSize = target.chunkSize > 0 ? target.chunkSize : DEFAULT_CHUNK_SIZE
       const anchor = Math.round(target.size * safeRatio)
-      const start = clamp(Math.round(anchor - chunkSize / 2), 0, Math.max(0, target.size - chunkSize))
+      const centeredStart = clamp(
+        Math.round(anchor - chunkSize / 2),
+        0,
+        Math.max(0, target.size - chunkSize)
+      )
+      const snapToEnd = safeRatio >= 1 - SCROLL_EPSILON
+      const snapToStart = safeRatio <= SCROLL_EPSILON
+      const start = snapToEnd
+        ? Math.max(0, target.size - chunkSize)
+        : snapToStart
+          ? 0
+          : centeredStart
+
+      const startRatio = target.size > 0 ? session.loadedRange.start / target.size : 0
+      const endRatio = target.size > 0 ? session.loadedRange.end / target.size : 1
+      if (safeRatio >= startRatio - SCROLL_EPSILON && safeRatio <= endRatio + SCROLL_EPSILON) {
+        debugLog('jumpToFilePosition skipped: ratio already in window', { tabId, ratio })
+        return
+      }
 
       setTabs((prev) =>
         prev.map((tab) =>
           tab.id === tabId && isFileTab(tab)
-            ? {
-                ...tab,
+            ? updateSessionState(tab, viewKey, activeViewKeyRef.current, (sessionState) => ({
+                ...sessionState,
                 isLoadingMore: true
-              }
+              }))
             : tab
         )
       )
@@ -875,7 +1128,10 @@ export const useTabsController = (): UseTabsControllerResult => {
           start: range.start,
           end: range.end
         })
-        const updatedTab = buildWindowedTabState(target, range)
+        const updatedTab = buildWindowedTabState(target, range, {
+          viewKey,
+          activeViewKey: activeViewKeyRef.current
+        })
         enqueueTabStateSync(updatedTab)
         setTabs((prev) =>
           prev.map((tab) => (tab.id === tabId && isFileTab(tab) ? updatedTab : tab))
@@ -885,10 +1141,10 @@ export const useTabsController = (): UseTabsControllerResult => {
         setTabs((prev) =>
           prev.map((tab) =>
             tab.id === tabId && isFileTab(tab)
-              ? {
-                  ...tab,
+              ? updateSessionState(tab, viewKey, activeViewKeyRef.current, (sessionState) => ({
+                  ...sessionState,
                   isLoadingMore: false
-                }
+                }))
               : tab
           )
         )
@@ -899,7 +1155,7 @@ export const useTabsController = (): UseTabsControllerResult => {
   )
 
   const ensureLineVisible = useCallback(
-    async (tabId: string, line: number) => {
+    async (tabId: string, line: number, viewKey?: string) => {
       const MAX_ITERATIONS = 200
       let iterations = 0
       while (iterations < MAX_ITERATIONS) {
@@ -910,15 +1166,16 @@ export const useTabsController = (): UseTabsControllerResult => {
         if (!target || !target.isWindowed) {
           break
         }
-        const windowStart = target.lineWindowStart
-        const windowEnd = target.lineWindowStart + Math.max(0, target.loadedLineCount - 1)
+        const session = getSessionState(target, viewKey)
+        const windowStart = session.lineWindowStart
+        const windowEnd = session.lineWindowStart + Math.max(0, session.loadedLineCount - 1)
         if (line >= windowStart && line <= windowEnd) {
           break
         }
         if (line < windowStart) {
-          await loadMoreContent(tabId, 'backward')
+          await loadMoreContent(tabId, 'backward', viewKey)
         } else {
-          await loadMoreContent(tabId, 'forward')
+          await loadMoreContent(tabId, 'forward', viewKey)
         }
       }
     },
@@ -956,6 +1213,9 @@ export const useTabsController = (): UseTabsControllerResult => {
     handleSearchResultSelect,
     loadMoreContent,
     jumpToFilePosition,
-    ensureLineVisible
+    ensureLineVisible,
+    registerViewSession,
+    releaseViewSession,
+    setActiveViewSession
   }
 }

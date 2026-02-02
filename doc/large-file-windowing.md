@@ -69,6 +69,8 @@ These values stay in sync between `src/main/ipc.ts` and `src/renderer/src/compon
 
 - The `WindowedScrollBar` emits a ratio between `0` and `1`.
 - Renderer calculates `anchor = Math.round(tab.size * ratio)` and requests a centered range.
+- The seeker snaps to the head/tail when ratios approach `0` or `1`, guaranteeing that dragging to the bottom of the minimap/custom scrollbar always shows the actual end of the file instead of the top of the last chunk.
+- If the emitted ratio already falls within the currently loaded window (±1e-6), the renderer skips the IPC round-trip and simply scrolls inside the existing buffer, eliminating the bounce that occurred when users dragged the thumb repeatedly near the file edges.
 - After the range arrives, `pendingScrollRatioRef` snaps the textarea scroll position so the viewport matches
   the thumb location.
 
@@ -77,6 +79,11 @@ These values stay in sync between `src/main/ipc.ts` and `src/renderer/src/compon
 - When a search result targets a line outside the current window, `ensureLineVisible` loops (max 200 iterations) and
   keeps paging forward/backward until the desired line enters the loaded range. This is what allows search results to
   focus deeply into large files without preloading the entire document.
+
+### Split-pane Independence
+
+- Each split pane registers its own `windowSession` (`windowSessions["paneId::tabId"]`) so the sliding window state becomes per-pane. One pane can inspect the head of a log while another pane pins the tail, and minimap/custom scrollbar gestures only affect their respective sessions.
+- Sessions mirror the focused pane into the base tab fields so saves/dirty indicators remain accurate, and the main process only receives metadata for the currently active view to keep IPC payloads minimal.
 
 ---
 

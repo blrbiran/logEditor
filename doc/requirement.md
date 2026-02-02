@@ -242,6 +242,7 @@ tests/
   - `Window ▸ Split Right (CmdOrCtrl+\)` 与标签右键菜单的 “Split Right” 都触发同一 `menu:split-right` 流程，自动在右侧 pane 打开当前/指定标签；首次拆分强制 50/50 宽度。
   - `File ▸ Close Tab`（或 `CmdOrCtrl+W`）、标签 `×`、右键菜单 “Close Tab” 均只关闭当前 pane 下的视图；如果该标签在其他 pane 仍存在则保持打开。
   - 分栏之间共享底层 `Tab` 数据，但滚动位置、行号视图、WindowedScrollbar 等按 `paneId::tabId` 组合键独立维护，确保同一文件在多 pane 中互不干扰。
+  - 滑窗文件会为每个 `paneId::tabId` 分配独立的 `windowSessions`，每个 session 维护自己的 chunk、滚动位置与脏状态，因此 split 窗口的 minimap/custom scrollbar 可以单独跳转、互不影响。
   - 每个 pane 顶部的标签条支持拖拽重排/跨 pane 拖放，新建标签按钮、空白双击等操作会将 `pendingInsertionPane` 设置为目标 pane。
   - 标签右键菜单使用自定义 overlay（点击空白或按 Esc 关闭），并与拖拽/分栏 resize 等交互互斥以避免幽灵菜单。
 - 维护多组 `ref`：
@@ -284,6 +285,7 @@ tests/
   - 通过最多 600 行采样在 `<canvas>` 中绘制真实字符（每行最多 96 个字符，超出自动二分截断 + 添加省略号），让用户能在 16 px 轨道上看到实际文本结构而不仅是密度。
   - `normalizeThumbRange` 共享 helper，用 4% 最小视窗高度展示当前 viewport，拖拽/点击触发 `onSeek`。
   - 滑窗模式会调用 `jumpToFilePosition` 触发新的窗口读取；普通模式直接同步 textarea 滚动。
+  - 拖动到轨道顶部或底部会自动吸附到整份文件的首/尾，并将 textarea 滚动到对应位置，避免加载最后一个 chunk 时出现反复跳动。
 - `WindowedScrollBar`：
   - Props：`startRatio`、`endRatio`、`disabled`、`onSeek`。
   - Thumb 最小高度 4%，Pointer 事件驱动，利用 `normalizeThumbRange` 修复大文件拖动时的回弹。
@@ -304,6 +306,7 @@ tests/
   - `read-file-range`/`apply-window-edit` 协议。
   - `loadMoreContent`/`jumpToFilePosition`/`ensureLineVisible` 算法。
   - `MAX_STREAM_MATCHES = 5000` 避免搜索结果爆炸。
+- `windowSessions` 以 `paneId::tabId` 为 key 缓存各个 split pane 的窗口状态，同一文件可以在不同 pane 同时加载不同 chunk；保存/滚动等操作只影响当前 session，关闭 pane 时自动回收 session。
 - `doc/memory-optimization-notes.md` 提供 40 MB+ 样本的 Activity Monitor 截图及验证 checklist，证明滑窗方案能稳定内存占用。
 
 实现任何新的文件读取策略或 UI 变更时必须同步更新上述文档与本需求说明。

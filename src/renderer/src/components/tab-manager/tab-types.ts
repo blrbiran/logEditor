@@ -2,6 +2,17 @@ import type { FileLoadedRange, SearchRequest, SearchResultItem } from '@renderer
 
 export const WELCOME_TAB_ID = 'welcome-tab'
 
+export type WindowSessionState = {
+  content: string
+  loadedRange: FileLoadedRange
+  lineWindowStart: number
+  loadedLineCount: number
+  isLoadingMore: boolean
+  isDirty: boolean
+  isReadOnly: boolean
+  hasWindowEdits: boolean
+}
+
 export type FileTab = {
   kind: 'file'
   id: string
@@ -22,6 +33,7 @@ export type FileTab = {
   isWindowed: boolean
   windowOverlap: number
   hasWindowEdits: boolean
+  windowSessions?: Record<string, WindowSessionState>
 }
 
 export type SearchTab = {

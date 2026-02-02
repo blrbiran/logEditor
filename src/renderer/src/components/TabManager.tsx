@@ -13,7 +13,8 @@ import {
   isWelcomeTab,
   type FileTab,
   type SearchTab,
-  type Tab
+  type Tab,
+  type WindowSessionState
 } from './tab-manager/tab-types'
 
 const api: LogEditorApi = window.api
@@ -58,6 +59,19 @@ const parseViewKey = (viewKey: string): { paneId: PaneId | null; tabId: string }
     return { paneId, tabId }
   }
   return { paneId: null, tabId }
+}
+
+const PRIMARY_VIEW_SESSION = '__primary__'
+const RATIO_EPSILON = 0.000001
+
+const getViewSession = (tab: FileTab, viewKey: string): WindowSessionState | null => {
+  if (tab.windowSessions?.[viewKey]) {
+    return tab.windowSessions[viewKey]
+  }
+  if (tab.windowSessions?.[PRIMARY_VIEW_SESSION]) {
+    return tab.windowSessions[PRIMARY_VIEW_SESSION]
+  }
+  return null
 }
 
 const formatBytes = (size: number): string => {
@@ -114,11 +128,16 @@ const collectDroppedFilePaths = (transfer: DataTransfer | null): string[] => {
   return Array.from(filePaths)
 }
 
-const estimateLineNumberGutterWidth = (tab: FileTab | null | undefined): number => {
+const estimateLineNumberGutterWidth = (
+  tab: FileTab | null | undefined,
+  session?: WindowSessionState | null
+): number => {
   if (!tab) {
     return LINE_NUMBER_GUTTER_WIDTH
   }
-  const windowEndLine = tab.lineWindowStart + Math.max(0, tab.loadedLineCount - 1)
+  const sessionStart = session?.lineWindowStart ?? tab.lineWindowStart
+  const sessionCount = session?.loadedLineCount ?? tab.loadedLineCount
+  const windowEndLine = sessionStart + Math.max(0, sessionCount - 1)
   const knownLines = Math.max(tab.lineCount, windowEndLine, 1)
   const digits = knownLines > 0 ? Math.floor(Math.log10(knownLines)) + 1 : 1
   const groupingChars = Math.max(0, Math.floor((digits - 1) / 3))
@@ -288,7 +307,10 @@ function TabManager(): React.JSX.Element {
     handleSearchResultSelect,
     loadMoreContent,
     jumpToFilePosition,
-    ensureLineVisible
+    ensureLineVisible,
+    registerViewSession,
+    releaseViewSession,
+    setActiveViewSession
   } = useTabsController()
 
   const [splitLayout, setSplitLayout] = useState<SplitLayoutState>(() => ({
@@ -309,6 +331,7 @@ function TabManager(): React.JSX.Element {
   const draggingTabRef = useRef<{ tabId: string; sourcePaneId: PaneId } | null>(null)
   const pendingInsertionPaneRef = useRef<PaneId>(PRIMARY_PANE_ID)
   const previousPaneCountRef = useRef<number>(1)
+  const mountedViewKeysRef = useRef<Set<string>>(new Set())
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState>(null)
   const tabMap = useMemo(() => {
     const map = new Map<string, Tab>()
@@ -328,6 +351,16 @@ function TabManager(): React.JSX.Element {
       }
     })
   }, [tabs])
+
+  useEffect(() => {
+    const focusedPane = splitLayout.panes.find((pane) => pane.id === splitLayout.focusedPaneId)
+    const activeTabForPane = focusedPane?.activeTabId ?? null
+    if (activeTabForPane) {
+      setActiveViewSession(buildViewKey(focusedPane?.id ?? splitLayout.focusedPaneId, activeTabForPane))
+    } else {
+      setActiveViewSession(null)
+    }
+  }, [setActiveViewSession, splitLayout.focusedPaneId, splitLayout.panes])
 
   useEffect(() => {
     setSplitLayout((prev) => {
@@ -418,7 +451,22 @@ function TabManager(): React.JSX.Element {
     pruneRecord(highlightInfoRef.current)
     pruneRecord(highlightTimeoutRef.current)
     pruneRecord(standardScrollMetricsRef.current)
-  }, [splitLayout])
+    const previousKeys = mountedViewKeysRef.current
+    const addedKeys = Array.from(validKeys).filter((key) => !previousKeys.has(key))
+    const removedKeys = Array.from(previousKeys).filter((key) => !validKeys.has(key))
+    addedKeys.forEach((viewKey) => {
+      const { tabId } = parseViewKey(viewKey)
+      const tab = tabMap.get(tabId)
+      if (tab && isFileTab(tab) && tab.isWindowed) {
+        registerViewSession(tabId, viewKey)
+      }
+    })
+    removedKeys.forEach((viewKey) => {
+      const { tabId } = parseViewKey(viewKey)
+      releaseViewSession(tabId, viewKey)
+    })
+    mountedViewKeysRef.current = validKeys
+  }, [registerViewSession, releaseViewSession, splitLayout, tabMap])
 
   const updateStandardScrollMetrics = useCallback(
     (viewKey: string, textarea: HTMLTextAreaElement | null) => {
@@ -618,10 +666,14 @@ function TabManager(): React.JSX.Element {
           pendingScrollRatioRef.current[viewKey] = null
           return
         }
-        if (targetRatio < startRatio || targetRatio > startRatio + chunkSpan) {
+        if (
+          targetRatio < startRatio - RATIO_EPSILON ||
+          targetRatio > startRatio + chunkSpan + RATIO_EPSILON
+        ) {
           return
         }
-        const relative = clamp((targetRatio - startRatio) / chunkSpan, 0, 1)
+        const boundedRatio = clamp(targetRatio, startRatio, startRatio + chunkSpan)
+        const relative = chunkSpan > 0 ? (boundedRatio - startRatio) / chunkSpan : 0
         const scrollable = textarea.scrollHeight - textarea.clientHeight
         if (scrollable <= 0) {
           pendingScrollRatioRef.current[viewKey] = null
@@ -781,7 +833,11 @@ function TabManager(): React.JSX.Element {
     (tab: FileTab, textarea: HTMLTextAreaElement, viewKey: string) => {
       scheduleLineViewportUpdate(viewKey, textarea)
       if (tab.isWindowed) {
-        if (tab.isLoadingMore || tab.isDirty) {
+        const session = getViewSession(tab, viewKey)
+        const sessionRange = session?.loadedRange ?? tab.loadedRange
+        const sessionLoading = session?.isLoadingMore ?? tab.isLoadingMore
+        const sessionDirty = session?.isDirty ?? tab.isDirty
+        if (sessionLoading || sessionDirty) {
           return
         }
         const scrollable = textarea.scrollHeight - textarea.clientHeight
@@ -789,15 +845,15 @@ function TabManager(): React.JSX.Element {
           return
         }
         const scrollRatio = textarea.scrollTop / scrollable
-        if (scrollRatio > 0.95 && tab.loadedRange.end < tab.size) {
-          void loadMoreContent(tab.id, 'forward').catch((error) => {
+        if (scrollRatio > 0.95 && sessionRange.end < tab.size) {
+          void loadMoreContent(tab.id, 'forward', viewKey).catch((error) => {
             if (import.meta.env.DEV) {
               // eslint-disable-next-line no-console
               console.error('[TabManager] window shift forward failed', error)
             }
           })
-        } else if (scrollRatio < 0.05 && tab.loadedRange.start > 0) {
-          void loadMoreContent(tab.id, 'backward').catch((error) => {
+        } else if (scrollRatio < 0.05 && sessionRange.start > 0) {
+          void loadMoreContent(tab.id, 'backward', viewKey).catch((error) => {
             if (import.meta.env.DEV) {
               // eslint-disable-next-line no-console
               console.error('[TabManager] window shift backward failed', error)
@@ -821,7 +877,7 @@ function TabManager(): React.JSX.Element {
       const targetRatio = targetLine / totalLines
       if (targetRatio >= loadedRatio - 0.02) {
         autoScrollIntentRef.current[viewKey] = scrollRatio > 0.9
-        void loadMoreContent(tab.id, 'forward').catch((error) => {
+        void loadMoreContent(tab.id, 'forward', viewKey).catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
             console.error('[TabManager] auto load failed', error)
@@ -845,18 +901,25 @@ function TabManager(): React.JSX.Element {
     []
   )
 
-  const focusPane = useCallback((paneId: PaneId) => {
-    pendingInsertionPaneRef.current = paneId
-    setSplitLayout((prev) => {
-      if (prev.focusedPaneId === paneId || !prev.panes.some((pane) => pane.id === paneId)) {
-        return prev
+  const focusPane = useCallback(
+    (paneId: PaneId) => {
+      pendingInsertionPaneRef.current = paneId
+      const paneState = splitLayout.panes.find((pane) => pane.id === paneId)
+      if (paneState?.activeTabId) {
+        setActiveViewSession(buildViewKey(paneId, paneState.activeTabId))
       }
-      return {
-        ...prev,
-        focusedPaneId: paneId
-      }
-    })
-  }, [])
+      setSplitLayout((prev) => {
+        if (prev.focusedPaneId === paneId || !prev.panes.some((pane) => pane.id === paneId)) {
+          return prev
+        }
+        return {
+          ...prev,
+          focusedPaneId: paneId
+        }
+      })
+    },
+    [setActiveViewSession, splitLayout.panes]
+  )
 
   const ensurePaneExists = useCallback((paneId: PaneId) => {
     if (paneId === PRIMARY_PANE_ID) {
@@ -917,10 +980,11 @@ function TabManager(): React.JSX.Element {
       })
       pendingInsertionPaneRef.current = paneId
       if (shouldFocus) {
+        setActiveViewSession(buildViewKey(paneId, tabId))
         switchTab(tabId)
       }
     },
-    [ensurePaneExists, switchTab]
+    [ensurePaneExists, setActiveViewSession, switchTab]
   )
 
   const moveTabBetweenPanes = useCallback(
@@ -1223,7 +1287,8 @@ function TabManager(): React.JSX.Element {
       const paneId = splitLayout.focusedPaneId
       activateTabInPane(paneId, payload.tabId, { focus: true })
       const ensureAndFocus = async () => {
-        await ensureLineVisible(payload.tabId, payload.line)
+        const targetKey = buildViewKey(paneId, payload.tabId)
+        await ensureLineVisible(payload.tabId, payload.line, targetKey)
         requestAnimationFrame(() => focusLine(paneId, payload.tabId, payload.line, payload.column))
       }
       void ensureAndFocus()
@@ -1241,7 +1306,8 @@ function TabManager(): React.JSX.Element {
       handleSearchResultSelect(result, match)
       activateTabInPane(targetPaneId, result.tabId, { focus: true })
       const ensureLoaded = async () => {
-        await ensureLineVisible(result.tabId, match.line)
+        const targetKey = buildViewKey(targetPaneId, result.tabId)
+        await ensureLineVisible(result.tabId, match.line, targetKey)
         requestAnimationFrame(() => focusLine(targetPaneId, result.tabId, match.line, match.column))
       }
       void ensureLoaded()
@@ -1269,13 +1335,21 @@ function TabManager(): React.JSX.Element {
     }
     if (isFileTab(tab)) {
       const viewKey = buildViewKey(paneId, tab.id)
+      const session = getViewSession(tab, viewKey)
+      const sessionContent = session?.content ?? tab.content
+      const sessionLoadedRange = session?.loadedRange ?? tab.loadedRange
+      const sessionLineWindowStart = session?.lineWindowStart ?? tab.lineWindowStart
+      const sessionLoadedLineCount = session?.loadedLineCount ?? tab.loadedLineCount
+      const sessionIsLoading = session?.isLoadingMore ?? tab.isLoadingMore
+      const sessionIsDirty = session?.isDirty ?? tab.isDirty
+      const sessionIsReadOnly = session?.isReadOnly ?? tab.isReadOnly
       const loadedBytes = Math.max(0, tab.loadedRange.end - tab.loadedRange.start)
       const totalBytes = tab.size > 0 ? tab.size : loadedBytes
       const viewport = lineViewportRef.current[viewKey] ?? defaultLineViewport
-      const totalLines = Math.max(tab.loadedLineCount, 1)
+      const totalLines = Math.max(sessionLoadedLineCount, 1)
       const safeFirstLine = Math.min(Math.max(1, viewport.firstLine), totalLines)
       const chunkRemaining = Math.max(1, totalLines - safeFirstLine + 1)
-      const windowStartLine = Math.max(1, tab.lineWindowStart)
+      const windowStartLine = Math.max(1, sessionLineWindowStart)
       const knownLineCount = tab.lineCount > 0 ? tab.lineCount : 0
       const globalFirstLine = windowStartLine + safeFirstLine - 1
       const fileRemaining =
@@ -1293,12 +1367,12 @@ function TabManager(): React.JSX.Element {
         }
         return Math.max(1, globalLineNumber)
       })
-      const disableWindowShift = tab.isLoadingMore || tab.isDirty
-      const lineNumberGutterWidth = estimateLineNumberGutterWidth(tab)
+      const disableWindowShift = sessionIsLoading || sessionIsDirty
+      const lineNumberGutterWidth = estimateLineNumberGutterWidth(tab, session)
       const chunkStartRatio =
-        tab.size > 0 ? Math.max(0, tab.loadedRange.start / tab.size) : 0
+        tab.size > 0 ? Math.max(0, sessionLoadedRange.start / tab.size) : 0
       const chunkEndRatio =
-        tab.size > 0 ? Math.min(1, tab.loadedRange.end / tab.size) : 1
+        tab.size > 0 ? Math.min(1, sessionLoadedRange.end / tab.size) : 1
       const scrollMetrics = standardScrollMetricsRef.current[viewKey]
       const standardScrollStart = scrollMetrics?.scrollRatio ?? 0
       const standardScrollEnd = standardScrollStart + (scrollMetrics?.viewportRatio ?? 1)
@@ -1309,7 +1383,7 @@ function TabManager(): React.JSX.Element {
         }
         const clamped = clamp(nextRatio, 0, 1)
         pendingScrollRatioRef.current[viewKey] = clamped
-        void jumpToFilePosition(tab.id, clamped).catch((error) => {
+        void jumpToFilePosition(tab.id, clamped, viewKey).catch((error) => {
           if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
             console.error('[TabManager] window jump failed', error)
@@ -1386,19 +1460,19 @@ function TabManager(): React.JSX.Element {
                       initialScrollAppliedRef.current[viewKey] = true
                     }
                     updateStandardScrollMetrics(viewKey, el)
-                    scheduleLineViewportUpdate(viewKey, el)
-                  }}
-                  value={tab.content}
-                  onChange={(event) => updateTabContent(tab.id, event.target.value)}
-                  onDragOver={createExternalDragOverHandler(paneId)}
-                  onDrop={createExternalDropHandler(paneId)}
-                  onScroll={(event) => handleFileScroll(tab, event.currentTarget, viewKey)}
-                  readOnly={tab.isReadOnly}
-                  className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
-                    tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
-                  }`}
-                  spellCheck={false}
-                />
+                scheduleLineViewportUpdate(viewKey, el)
+              }}
+              value={sessionContent}
+              onChange={(event) => updateTabContent(tab.id, event.target.value, viewKey)}
+              onDragOver={createExternalDragOverHandler(paneId)}
+              onDrop={createExternalDropHandler(paneId)}
+              onScroll={(event) => handleFileScroll(tab, event.currentTarget, viewKey)}
+              readOnly={sessionIsReadOnly}
+              className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
+                sessionIsReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
+              }`}
+              spellCheck={false}
+            />
                 <div
                   ref={(el) => {
                     highlightRefs.current[viewKey] = el
