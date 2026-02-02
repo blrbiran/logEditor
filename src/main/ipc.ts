@@ -29,12 +29,16 @@ const DEFAULT_CHUNK_SIZE = 512 * 1024
 const textDecoder = new TextDecoder('utf-8')
 const lineCache = new Map<string, Map<number, number>>()
 
+export const resetLineCache = (): void => {
+  lineCache.clear()
+}
+
 type LineBreakStats = {
   breaks: number
   endsWithBreak: boolean
 }
 
-const getLineBreakStats = (value: string): LineBreakStats => {
+export const getLineBreakStats = (value: string): LineBreakStats => {
   let breaks = 0
   let endsWithBreak = false
   for (let index = 0; index < value.length; index += 1) {
@@ -48,7 +52,7 @@ const getLineBreakStats = (value: string): LineBreakStats => {
   return { breaks, endsWithBreak }
 }
 
-const countLinesInText = (value: string, stats?: LineBreakStats): number => {
+export const countLinesInText = (value: string, stats?: LineBreakStats): number => {
   if (!value.length) {
     return 1
   }
@@ -60,7 +64,7 @@ const countLinesInText = (value: string, stats?: LineBreakStats): number => {
   return total
 }
 
-const countLinesInFile = async (filePath: string): Promise<number> => {
+export const countLinesInFile = async (filePath: string): Promise<number> => {
   return await new Promise((resolve, reject) => {
     let count = 0
     let endsWithBreak = false
@@ -69,17 +73,18 @@ const countLinesInFile = async (filePath: string): Promise<number> => {
       encoding: 'utf-8',
       highWaterMark: 256 * 1024
     })
-    stream.on('data', (chunk: string) => {
-      if (!chunk.length) {
+    stream.on('data', (chunk: string | Buffer) => {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString('utf-8')
+      if (!data.length) {
         return
       }
       sawData = true
-      for (let index = 0; index < chunk.length; index += 1) {
-        if (chunk.charCodeAt(index) === 10) {
+      for (let index = 0; index < data.length; index += 1) {
+        if (data.charCodeAt(index) === 10) {
           count += 1
         }
       }
-      endsWithBreak = chunk.charCodeAt(chunk.length - 1) === 10
+      endsWithBreak = data.charCodeAt(data.length - 1) === 10
     })
     stream.on('end', () => {
       if (!sawData) {
@@ -104,7 +109,7 @@ const getOrInitLineCache = (filePath: string): Map<number, number> => {
   return cache
 }
 
-const getLineNumberForOffset = async (filePath: string, offset: number): Promise<number> => {
+export const getLineNumberForOffset = async (filePath: string, offset: number): Promise<number> => {
   if (offset <= 0) {
     return 1
   }
@@ -175,7 +180,7 @@ const copySegment = async (
   })
 }
 
-const applyWindowEdit = async ({
+export const applyWindowEdit = async ({
   filePath,
   rangeStart,
   rangeEnd,
@@ -223,7 +228,7 @@ const applyWindowEdit = async ({
   }
 }
 
-const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
+export const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
   try {
     const stats = await fs.stat(filePath)
     if (!stats.isFile()) {
@@ -281,7 +286,7 @@ const readFileHead = async (filePath: string): Promise<OpenedFile | null> => {
   }
 }
 
-const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
+export const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
   const results: OpenedFile[] = []
   const seen = new Set<string>()
 
@@ -300,7 +305,7 @@ const readFiles = async (filePaths: string[]): Promise<OpenedFile[]> => {
   return results
 }
 
-const readFileRange = async ({
+export const readFileRange = async ({
   filePath,
   start,
   length
@@ -313,13 +318,16 @@ const readFileRange = async ({
     const stats = await handle.stat()
     const totalSize = stats.size
     if (safeStart >= totalSize) {
+      const startLine = await getLineNumberForOffset(filePath, totalSize)
       return {
         filePath,
         start: safeStart,
         end: safeStart,
         content: '',
         totalSize,
-        hasMore: false
+        hasMore: false,
+        startLine,
+        lineCount: 1
       }
     }
 
