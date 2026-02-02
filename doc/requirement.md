@@ -72,6 +72,7 @@ src/
                 ├── useTabsController.ts
                 ├── SearchResultsPanel.tsx
                 ├── WindowedScrollBar.tsx
+                ├── Minimap.tsx
                 ├── constants.ts / helpers.ts / search-utils.ts / tab-types.ts
 doc/
 ├── requirement.md
@@ -254,9 +255,10 @@ tests/
   - 启用滑窗 (`tab.isWindowed === true`) 后隐藏横幅，窗口切换由滚动位置与 `WindowedScrollBar` 驱动。
 - 标签栏关闭按钮：
   - 使用 `span` + `role="button"` + `tabIndex=0` 代替嵌套 `<button>`，既避免 HTML 语义冲突/水合报错，又在 Enter/Space 时调用 `closeTab` 并 `stopPropagation()`，防止误切换标签。
-- 自定义滚动条：
-  - `WindowedScrollBar` 被复用两次：滑窗模式显示文件窗口范围，普通模式与 textarea 滚动进度同步。
-  - 当 textarea 滚动到 95% 以上且仍有 `hasMore` 时自动触发 `loadMoreContent`；顶部 5% 会尝试向前加载窗口。
+  - 滚动预览与滚动条：
+    - `Minimap` 在右侧渲染 VS Code 风格的迷你地图，会采样最多 600 行文本并通过 `<canvas>` 绘制真实字符（自动压缩到 16 px 轨道内），拖拽、点击都会调用与滚动条相同的 `onSeek`，因此与 windowed/标准模式保持同步。
+    - `WindowedScrollBar` 仍被复用两次（滑窗/普通模式），并与 `Minimap` 共用 4% 的最小 thumb 限制以避免拖动时的“回弹”体验。
+    - 当 textarea 滚动到 95% 以上且仍有 `hasMore` 时自动触发 `loadMoreContent`；顶部 5% 会尝试向前加载窗口。
 - 拖拽：
   - `collectDroppedFilePaths` 支持 `text/uri-list`、`text/plain`、`dataTransfer.files`；若缺乏路径则 `readFilesFromBlobs` 读取 blob 文本。
   - `resolveDroppedFilePath` 先读取 Electron `File.path`，若在 context isolation 下失效则调用 `window.electron.webUtils.getPathForFile(file)` 复原真实路径，避免 Finder 拖拽 fallback 到 blob 导致大文件进入只读模式。
@@ -276,11 +278,16 @@ tests/
   - 使用 `forwardRef` 暴露滚动容器，便于上层保持不透明度。
   - `totalMatches` 写入标签标题（例如 “Search: "foo" (42)”）。
 
-### 8.5 `WindowedScrollBar`
+### 8.5 滚动预览 & `WindowedScrollBar`
 
-- Props：`startRatio`、`endRatio`、`disabled`、`onSeek`。
-- Thumb 最小高度 4%，拖拽使用 Pointer 事件，`renderStartRatio` 与 `thumbRatio` 保证窗口范围可视化。
-- 滑窗模式：`startRatio/endRatio` 取自 `tab.loadedRange / tab.size`；普通模式：来自 `standardScrollMetricsRef`。
+- `Minimap`：
+  - 通过最多 600 行采样在 `<canvas>` 中绘制真实字符（每行最多 96 个字符，超出自动二分截断 + 添加省略号），让用户能在 16 px 轨道上看到实际文本结构而不仅是密度。
+  - `normalizeThumbRange` 共享 helper，用 4% 最小视窗高度展示当前 viewport，拖拽/点击触发 `onSeek`。
+  - 滑窗模式会调用 `jumpToFilePosition` 触发新的窗口读取；普通模式直接同步 textarea 滚动。
+- `WindowedScrollBar`：
+  - Props：`startRatio`、`endRatio`、`disabled`、`onSeek`。
+  - Thumb 最小高度 4%，Pointer 事件驱动，利用 `normalizeThumbRange` 修复大文件拖动时的回弹。
+  - 滑窗模式 `startRatio/endRatio` 取自 `tab.loadedRange / tab.size`；普通模式来自 `standardScrollMetricsRef`。
 
 ### 8.6 欢迎页、拖拽与粘性滚动
 

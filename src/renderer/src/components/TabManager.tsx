@@ -4,6 +4,7 @@ import type { LogEditorApi, OpenedFile, SearchMatch, SearchResultItem } from '@r
 import { SearchResultsPanel } from './tab-manager/SearchResultsPanel'
 import { LINE_NUMBER_GUTTER_WIDTH } from './tab-manager/constants'
 import { clamp } from './tab-manager/helpers'
+import { Minimap } from './tab-manager/Minimap'
 import { WindowedScrollBar } from './tab-manager/WindowedScrollBar'
 import { useTabsController } from './tab-manager/useTabsController'
 import {
@@ -1375,50 +1376,67 @@ function TabManager(): React.JSX.Element {
                 ))}
               </div>
             </div>
-            <textarea
-              ref={(el) => {
-                editorRefs.current[viewKey] = el
-                if (el && !initialScrollAppliedRef.current[viewKey]) {
-                  el.scrollTop = 0
-                  initialScrollAppliedRef.current[viewKey] = true
-                }
-                updateStandardScrollMetrics(viewKey, el)
-                scheduleLineViewportUpdate(viewKey, el)
-              }}
-              value={tab.content}
-              onChange={(event) => updateTabContent(tab.id, event.target.value)}
-              onDragOver={createExternalDragOverHandler(paneId)}
-              onDrop={createExternalDropHandler(paneId)}
-              onScroll={(event) => handleFileScroll(tab, event.currentTarget, viewKey)}
-              readOnly={tab.isReadOnly}
-              className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
-                tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
-              }`}
-              spellCheck={false}
-            />
-            {tab.isWindowed ? (
-              <WindowedScrollBar
-                startRatio={chunkStartRatio}
-                endRatio={chunkEndRatio}
-                disabled={disableWindowShift}
-                onSeek={handleWindowSeek}
-              />
-            ) : (
-              <WindowedScrollBar
-                startRatio={standardScrollStart}
-                endRatio={standardScrollEnd}
-                disabled={standardScrollDisabled}
-                onSeek={(ratio) => handleStandardSeek(viewKey, ratio)}
-              />
-            )}
+            <div className="flex flex-1 min-h-0 items-stretch">
+              <div className="relative flex-1">
+                <textarea
+                  ref={(el) => {
+                    editorRefs.current[viewKey] = el
+                    if (el && !initialScrollAppliedRef.current[viewKey]) {
+                      el.scrollTop = 0
+                      initialScrollAppliedRef.current[viewKey] = true
+                    }
+                    updateStandardScrollMetrics(viewKey, el)
+                    scheduleLineViewportUpdate(viewKey, el)
+                  }}
+                  value={tab.content}
+                  onChange={(event) => updateTabContent(tab.id, event.target.value)}
+                  onDragOver={createExternalDragOverHandler(paneId)}
+                  onDrop={createExternalDropHandler(paneId)}
+                  onScroll={(event) => handleFileScroll(tab, event.currentTarget, viewKey)}
+                  readOnly={tab.isReadOnly}
+                  className={`editor-scrollbar h-full w-full resize-none p-0 font-mono text-sm leading-6 outline-none ${
+                    tab.isReadOnly ? 'bg-slate-50 text-slate-700' : 'bg-transparent text-slate-900'
+                  }`}
+                  spellCheck={false}
+                />
+                <div
+                  ref={(el) => {
+                    highlightRefs.current[viewKey] = el
+                  }}
+                  className="pointer-events-none absolute inset-0 bg-amber-200/60 opacity-0 transition-opacity"
+                />
+              </div>
+              <div className="ml-2 flex h-full items-stretch gap-2">
+                <Minimap
+                  content={tab.content}
+                  startRatio={tab.isWindowed ? chunkStartRatio : standardScrollStart}
+                  endRatio={tab.isWindowed ? chunkEndRatio : standardScrollEnd}
+                  disabled={tab.isWindowed ? disableWindowShift : standardScrollDisabled}
+                  onSeek={
+                    tab.isWindowed ? handleWindowSeek : (ratio) => handleStandardSeek(viewKey, ratio)
+                  }
+                  className="h-full w-16"
+                />
+                {tab.isWindowed ? (
+                  <WindowedScrollBar
+                    startRatio={chunkStartRatio}
+                    endRatio={chunkEndRatio}
+                    disabled={disableWindowShift}
+                    onSeek={handleWindowSeek}
+                    className="h-full"
+                  />
+                ) : (
+                  <WindowedScrollBar
+                    startRatio={standardScrollStart}
+                    endRatio={standardScrollEnd}
+                    disabled={standardScrollDisabled}
+                    onSeek={(ratio) => handleStandardSeek(viewKey, ratio)}
+                    className="h-full"
+                  />
+                )}
+              </div>
+            </div>
           </div>
-          <div
-            ref={(el) => {
-              highlightRefs.current[viewKey] = el
-            }}
-            className="pointer-events-none absolute right-0 bg-amber-200/60 opacity-0 transition-opacity"
-            style={{ left: `${lineNumberGutterWidth}px` }}
-          />
         </div>
       )
     }

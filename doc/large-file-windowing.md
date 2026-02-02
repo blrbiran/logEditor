@@ -112,9 +112,11 @@ See `doc/memory-optimization-notes.md` for the motivation and empirical memory m
 - `TabManager` paints:
   - A banner describing loaded bytes and the `Load next chunk`/`Fully loaded` prompts (only for non-windowed truncated tabs; windowed tabs hide it).
   - Dynamic gutter numbers by calculating the visible window (never more than 400 entries).
+  - A VS Code-style preview (`Minimap`) next to the custom scrollbar. It samples up to 600 lines from the currently loaded window, draws the actual characters (96 chars per line max, auto-ellipsized) onto a `<canvas>`, and forwards pointer drags/clicks to the same `onSeek` handler used by the scrollbar so window jumps stay in sync even when the renderer only hosts a sliding window.
   - `WindowedScrollBar`:
     - **Windowed tabs** – thumb shows the file portion currently buffered; dragging triggers `jumpToFilePosition`.
     - **Fully loaded tabs** – thumb mirrors the native textarea scroll metrics (`standardScrollMetricsRef`).
+    - Both the preview and the scrollbar share a `normalizeThumbRange` helper that enforces a 4 % minimum thumb size to eliminate the bounce that previously occurred when dragging near the edges of very large files.
 - High-visibility highlights (`highlightRefs`) persist while the user is navigating search results and fade after 2 s.
 
 Follow this document whenever implementing new ingestion strategies or extending the renderer so large files continue to
